@@ -101,21 +101,40 @@
 
   // ---- أنماط التعرّف ----------------------------------------------------
 
-  // رمز المقرر: أحرف عربية (اسم القسم مثل "نما"/"عربي"/"سلم") متبوعة/مسبوقة بأرقام،
-  // وقد يتخللها شرطة ورقم وحدات. أمثلة بعد التطبيع قد تظهر:
-  //   "نما2044", "نما-2044", "نما6004-3", "6004نما-3"
-  // نلتقط أي قطعة تحوي 3 أرقام متتالية على الأقل مع وجود أحرف عربية.
-  const COURSE_CODE_RE = /^(?=.*[ء-ي])(?=.*\d{3,})[ء-ي0-9\-]+$/;
+  // رمز المقرر: أحرف (عربية أو لاتينية) مع 3–4 أرقام، وقد يتخللها شرطة ورقم وحدات.
+  // أمثلة: "نما2044"، "نما-2044"، "6004نما-3"، "MIS6001"، "MIS-6001".
+  const COURSE_CODE_RE = /^(?=.*[A-Za-zء-ي])(?=.*\d{3,})[A-Za-zء-ي0-9\-]+$/;
 
-  // رموز التقديرات المقبولة (عربي)
+  // كشف لغة السجل من نسبة الأحرف اللاتينية مقابل العربية.
+  function detectLang(items) {
+    let ar = 0, la = 0;
+    for (const it of items) {
+      for (const ch of it.str) {
+        const c = ch.codePointAt(0);
+        if (c >= 0x0600 && c <= 0x06ff) ar++;
+        else if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) la++;
+      }
+    }
+    return la > ar ? "en" : "ar";
+  }
+
+  // رموز التقديرات المقبولة (عربي + إنجليزي)
   const GRADE_TOKENS = new Set([
     "أ+", "أ", "ا+", "ا", "ب+", "ب", "ج+", "ج", "د+", "د", "هـ", "ه",
     "ع", "ح", "ل", "ند", "م",
+    "A+", "A", "B+", "B", "C+", "C", "D+", "D", "F",
   ]);
+
+  // تحويل التقدير الإنجليزي إلى الرمز العربي المعتمد في الواجهة.
+  const EN_TO_AR_GRADE = {
+    "A+": "أ+", "A": "أ", "B+": "ب+", "B": "ب", "C+": "ج+",
+    "C": "ج", "D+": "د+", "D": "د", "F": "هـ",
+  };
 
   function isGradeToken(s) {
     const t = s.replace(/\s+/g, "");
     if (GRADE_TOKENS.has(t)) return true;
+    if (GRADE_TOKENS.has(t.toUpperCase())) return true;
     // أشكال مثل "+ب" بسبب الاتجاه
     if (/^\+[ابجدأاه]$/.test(t)) return true;
     return false;
@@ -125,76 +144,66 @@
     return /^-?\d+(\.\d+)?$/.test(s.replace(/\s+/g, ""));
   }
 
-  // كلمات دلالية في الترويسة والملخصات
+  // كلمات دلالية ثنائية اللغة في الترويسة والملخصات
   const KW = {
-    name: ["الاسم"],
-    studentId: ["رقم الطالب"],
-    civil: ["السجل المدني"],
-    major: ["التخصص"],
-    degree: ["الدرجة"],
-    college: ["الكلية"],
-    semester: ["فصلي"],
-    cumulative: ["تراكمي"],
-    earned: ["مكتسبة"],
-    gpaWord: ["معدل"],
-    remedialStart: ["المقررات التكميلية"],
-    remedialEnd: ["نهاية المقررات التكميلية"],
-    termLine: ["الفصل"],
-    warnings: ["الانذارات", "الإنذارات"],
+    name: ["الاسم", "name", "student name"],
+    studentId: ["رقم الطالب", "student no", "student id", "id no", "university no"],
+    civil: ["السجل المدني", "civil record", "national id", "id number"],
+    major: ["التخصص", "major", "specialization", "specialty"],
+    degree: ["الدرجة", "degree", "level"],
+    college: ["الكلية", "college", "faculty"],
+    semester: ["فصلي", "semester", "term"],
+    cumulative: ["تراكمي", "cumulative", "cum gpa", "cumulative gpa"],
+    earned: ["مكتسبة", "earned"],
+    gpaWord: ["معدل", "gpa", "average"],
+    remedialStart: ["المقررات التكميلية", "remedial courses", "preparatory courses", "complementary courses"],
+    remedialEnd: ["نهاية المقررات التكميلية", "end of remedial", "end of complementary"],
+    termLine: ["الفصل", "semester", "term"],
+    warnings: ["الانذارات", "الإنذارات", "warnings", "warning"],
   };
 
-  function rowText(row) {
-    // النص بترتيب القراءة العربي: من اليمين (x الأكبر) إلى اليسار
-    return row.items
-      .slice()
-      .sort((a, b) => b.x - a.x)
-      .map((i) => i.str)
-      .join(" ");
+  function rowText(row, lang) {
+    // ترتيب القراءة: العربية من اليمين (x الأكبر) لليسار، والإنجليزية من اليسار لليمين.
+    const items = row.items.slice();
+    items.sort((a, b) => (lang === "en" ? a.x - b.x : b.x - a.x));
+    return items.map((i) => i.str).join(" ");
   }
 
   // ---- استخلاص الترويسة (بيانات الطالب) --------------------------------
 
-  function extractHeader(rows, pageWidth) {
+  function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function extractHeader(rows, pageWidth, lang) {
     const info = {
       university: "", college: "", name: "", studentId: "",
       civilId: "", major: "", degree: "", printDate: "",
     };
-    // نبحث في أعلى الصفحة (أول ~12 صفاً)
-    const head = rows.slice(0, 14);
-    const fullText = head.map(rowText).join("  ||  ");
+    const head = rows.slice(0, 16);
 
-    // الجامعة
-    if (/الملك\s*خالد/.test(fold(fullText).replace(/ا/g, "ا"))) {
-      info.university = "جامعة الملك خالد";
+    // تاريخ الطباعة (مشترك للغتين)
+    for (const r of rows) {
+      const m = rowText(r, lang).match(/(\d{1,2}[-/]\d{1,2}[-/]\d{4})/);
+      if (m) { info.printDate = m[1]; break; }
     }
 
-    // دوال التقاط "تسمية : قيمة" داخل نص صف
-    const grab = (text, keys) => {
-      for (const k of keys) {
-        const kf = fold(k);
-        const tf = fold(text);
-        const idx = tf.indexOf(kf);
-        if (idx === -1) continue;
-        // القيمة تقع يساراً (بعد التسمية في ترتيب القراءة) أو بعد النقطتين
-        // نأخذ ما بعد ":" الأقرب للكلمة
-        const after = text.slice(text.indexOf(":", text.indexOf(k.charAt(0))) + 1);
-        return after;
-      }
-      return "";
-    };
+    if (lang === "en") return extractHeaderEN(head, info);
+    return extractHeaderAR(head, info);
+  }
+
+  // ---- ترويسة السجل العربي (مسار مُتحقَّق منه) ----
+  function extractHeaderAR(head, info) {
+    const fullText = head.map((r) => rowText(r, "ar")).join("  ||  ");
+    if (/الملك\s*خالد/.test(fold(fullText))) info.university = "جامعة الملك خالد";
 
     for (const r of head) {
-      const t = rowText(r);
+      const t = rowText(r, "ar");
       const tf = fold(t);
-
       if (!info.name && tf.includes("الاسم")) {
-        // الاسم بين "الاسم :" وبداية التسمية التالية
         const m = t.match(/الاسم\s*:?\s*([^\:]+?)(?:التخصص|رقم|الدرجة|السجل|$)/);
         if (m) info.name = cleanVal(m[1]);
-        else {
-          const i = t.indexOf("الاسم");
-          info.name = cleanVal(t.slice(i + 5).replace(/^[\s:]+/, ""));
-        }
+        else info.name = cleanVal(t.slice(t.indexOf("الاسم") + 5).replace(/^[\s:]+/, ""));
       }
       if (!info.major && tf.includes("التخصص")) {
         const m = t.match(/التخصص\s*:?\s*([^\:]+?)(?:الاسم|رقم|الدرجة|السجل|$)/);
@@ -217,14 +226,43 @@
         if (m) info.college = cleanVal(m[1]);
       }
     }
+    return info;
+  }
 
-    // تاريخ الطباعة (لاتيني أو هجري)
-    for (const r of rows) {
-      const t = rowText(r);
-      const m = t.match(/(\d{1,2}-\d{1,2}-\d{4})/);
-      if (m) { info.printDate = m[1]; break; }
-    }
+  // ---- ترويسة السجل الإنجليزي (تُعاير على عيّنة حقيقية) ----
+  function extractHeaderEN(head, info) {
+    const fullText = head.map((r) => rowText(r, "en")).join("  ||  ");
+    if (/king\s*khalid/i.test(fullText)) info.university = "King Khalid University";
 
+    const allLabels = [].concat(
+      KW.name, KW.studentId, KW.civil, KW.major, KW.degree, KW.college,
+      ["print date", "page", "deanship", "academic record"]
+    );
+    const boundary = allLabels.map((l) => escapeRe(l)).join("|");
+
+    const grabText = (keys) => {
+      for (const k of keys) {
+        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z .'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||$)", "i");
+        const m = fullText.match(re);
+        if (m && m[1] && m[1].trim().length > 1) return cleanVal(m[1]);
+      }
+      return "";
+    };
+    const grabNum = (keys, minLen) => {
+      for (const k of keys) {
+        const re = new RegExp(escapeRe(k) + "\\D{0,12}(\\d{" + minLen + ",})", "i");
+        const m = fullText.match(re);
+        if (m) return m[1];
+      }
+      return "";
+    };
+
+    info.name = grabText(KW.name);
+    info.major = grabText(KW.major);
+    info.degree = grabText(KW.degree);
+    info.college = grabText(KW.college);
+    info.studentId = grabNum(KW.studentId, 5);
+    info.civilId = grabNum(KW.civil, 8);
     return info;
   }
 
@@ -242,46 +280,55 @@
    * نحدد العمود (يمين/يسار) عبر منتصف الصفحة، ثم نلتقط داخل نفس العمود:
    *   رمز المقرر (x الأكبر) ← اسم المقرر ← التقدير ← الساعات ← النقاط (x الأصغر).
    */
-  function parseCourses(rows, pageWidth) {
+  function parseCourses(rows, pageWidth, lang) {
     const mid = pageWidth / 2;
     const courses = [];
 
-    // تتبّع حالة "المقررات التكميلية" حسب الموضع الرأسي
+    // تتبّع حالة "المقررات التكميلية / Remedial" حسب الموضع الرأسي
     let remedial = false;
+    const remStartF = KW.remedialStart.map(fold);
+    const remEndF = KW.remedialEnd.map(fold);
 
     for (const row of rows) {
-      const t = rowText(row);
-      const tf = fold(t);
+      const tf = fold(rowText(row, lang));
 
-      if (tf.includes(fold("المقررات التكميلية")) && !tf.includes(fold("نهاية"))) {
+      if (remStartF.some((k) => tf.includes(k)) && !tf.includes(fold("نهاية")) && !/end of/i.test(tf)) {
         remedial = true;
       }
-      if (tf.includes(fold("نهاية المقررات التكميلية")) ||
-          tf.includes(fold("لاتدخل في احتساب"))) {
+      if (remEndF.some((k) => tf.includes(k)) || tf.includes(fold("لاتدخل في احتساب")) ||
+          /not\s+(counted|included)/i.test(tf)) {
         remedial = false;
       }
 
-      // ابحث عن رموز المقررات في هذا الصف (قد يوجد رمزان: عمود يمين وعمود يسار)
-      const codeItems = row.items.filter((it) => COURSE_CODE_RE.test(it.str));
+      // ابحث عن رموز المقررات في هذا الصف (قد يوجد رمزان عند التخطيط ثنائي العمود)
+      const codeItems = row.items
+        .filter((it) => COURSE_CODE_RE.test(it.str))
+        .sort((a, b) => a.x - b.x);
       if (codeItems.length === 0) continue;
 
-      for (const codeItem of codeItems) {
-        const isRight = codeItem.x >= mid;
-        // الخلايا ضمن نفس العمود فقط
-        const colItems = row.items.filter((it) =>
-          isRight ? it.x >= mid : it.x < mid
-        );
-
-        const course = buildCourse(codeItem, colItems, remedial);
+      // نطاق خلايا كل مقرر حسب اتجاه اللغة:
+      //  - العربية (RTL): الخلايا تقع يسار الرمز (x أقل) حتى رمز العمود التالي يساراً.
+      //  - الإنجليزية (LTR): الخلايا تقع يمين الرمز (x أكبر) حتى رمز العمود التالي يميناً.
+      for (let i = 0; i < codeItems.length; i++) {
+        const codeItem = codeItems[i];
+        let lo = -Infinity, hi = Infinity;
+        if (lang === "en") {
+          lo = codeItem.x - 0.5;
+          hi = i + 1 < codeItems.length ? codeItems[i + 1].x - 0.5 : Infinity;
+        } else {
+          hi = codeItem.x + 0.5;
+          lo = i - 1 >= 0 ? codeItems[i - 1].x + 0.5 : -Infinity;
+        }
+        const colItems = row.items.filter((it) => it.x > lo && it.x < hi);
+        const course = buildCourse(codeItem, colItems, remedial, lang);
         if (course) courses.push(course);
       }
     }
     return courses;
   }
 
-  function buildCourse(codeItem, colItems, remedial) {
+  function buildCourse(codeItem, colItems, remedial, lang) {
     const code = normalizeCode(codeItem.str);
-    // الترتيب البصري داخل العمود من اليمين (الرمز) إلى اليسار (النقاط)
     const ordered = colItems.slice().sort((a, b) => b.x - a.x);
 
     let grade = "";
@@ -295,7 +342,6 @@
       if (!grade && isGradeToken(s)) { grade = normalizeGrade(s); continue; }
       if (isNumberToken(s)) {
         const n = Number(s.replace(/\s+/g, ""));
-        // الساعات عدد صحيح صغير (1..9)، النقاط رقم عشري عادةً
         if (hours === null && Number.isInteger(n) && n >= 1 && n <= 12 && !s.includes(".")) {
           hours = n;
         } else if (points === null) {
@@ -303,13 +349,12 @@
         }
         continue;
       }
-      // غير ذلك: جزء من اسم المقرر
       nameParts.push(it);
     }
 
-    // اسم المقرر بترتيب القراءة (يمين ← يسار)
+    // اسم المقرر بترتيب القراءة: العربية يمين←يسار، الإنجليزية يسار←يمين
     const name = nameParts
-      .sort((a, b) => b.x - a.x)
+      .sort((a, b) => (lang === "en" ? a.x - b.x : b.x - a.x))
       .map((i) => i.str)
       .join(" ")
       .replace(/\s+/g, " ")
@@ -320,7 +365,7 @@
     const hasGrade = !!grade && grade !== "م";
     return {
       code,
-      name: name || "(بدون اسم)",
+      name: name || (lang === "en" ? "(no name)" : "(بدون اسم)"),
       grade: hasGrade ? grade : "",
       hours: hours || 0,
       points: points,
@@ -330,13 +375,24 @@
   }
 
   function normalizeCode(s) {
-    // الرمز قد يأتي بصيغ مختلفة بعد التطبيع: "نما-2044" أو "6005نما-3".
-    // نُخرج صيغة موحّدة: القسم (أحرف عربية) + رقم المقرر (3–4 أرقام)، ونُسقط لاحقة الوحدات.
+    // الرمز قد يأتي بصيغ: "نما-2044"، "6005نما-3"، "MIS6001"، "MIS-6001".
+    // نُخرج صيغة موحّدة: القسم (أحرف) + رقم المقرر (3–4 أرقام)، ونُسقط لاحقة الوحدات.
     const clean = s.replace(/\s+/g, "");
-    const ar = (clean.match(/[؀-ۿ]+/g) || []).join("");
+    const letters = (clean.match(/[A-Za-z؀-ۿ]+/g) || []).join("");
     const nums = clean.match(/\d+/g) || [];
     const courseNum = nums.find((n) => n.length >= 3) || nums[0] || "";
-    return ar && courseNum ? ar + courseNum : clean;
+    return letters && courseNum ? letters + courseNum : clean;
+  }
+
+  function normalizeGrade(s) {
+    let g = s.replace(/\s+/g, "");
+    if (g.startsWith("+")) g = g.slice(1) + "+"; // "+ب" → "ب+"
+    // إنجليزي → الرمز العربي المعتمد
+    const up = g.toUpperCase();
+    if (EN_TO_AR_GRADE[up]) return EN_TO_AR_GRADE[up];
+    g = g.replace(/^ا(\+?)$/, "أ$1"); // ا → أ
+    if (g === "ه") g = "هـ";
+    return g;
   }
 
   /**
@@ -363,14 +419,6 @@
     return { points, hours, gpa, courses: latest.size };
   }
 
-  function normalizeGrade(s) {
-    let g = s.replace(/\s+/g, "");
-    if (g.startsWith("+")) g = g.slice(1) + "+";
-    g = g.replace(/^ا(\+?)$/, "أ$1"); // ا → أ
-    if (g === "ه") g = "هـ";
-    return g;
-  }
-
   // ---- استخلاص الحالة التراكمية (نقطة انطلاق) --------------------------
 
   /**
@@ -383,17 +431,28 @@
    *   - الساعات المكتسبة = أصغرهما (الداخلة في المعدل).
    * نختار صف آخر فصل مكتمل = الصف ذو معدل > 0 والأكبر بالساعات المكتسبة.
    */
-  function extractCumulative(rows, pageWidth) {
+  function extractCumulative(rows, pageWidth, lang) {
     const mid = (pageWidth || 857) / 2;
     const candidates = [];
     for (const row of rows) {
-      // قد يحتوي الصف على عمودين؛ نعالج كل تسمية "تراكمي" ضمن عمودها فقط
+      // قد يحتوي الصف على عمودين؛ نعالج كل تسمية "تراكمي / Cumulative" ضمن عمودها فقط
       // لتفادي تلوّث الأرقام بترويسة العمود المجاور (مثل "الإنذارات: 1" و"1447").
-      const labels = row.items.filter((it) => fold(it.str).includes("تراكمي"));
+      const labels = row.items.filter((it) => {
+        const f = fold(it.str);
+        return f.includes("تراكمي") || /cumulative|cum\b/i.test(it.str);
+      });
       if (labels.length === 0) continue;
       for (const label of labels) {
-        const isRight = label.x >= mid;
-        const colItems = row.items.filter((it) => (isRight ? it.x >= mid : it.x < mid));
+        // اختيار خلايا الملخّص حسب الاتجاه:
+        //  - العربية: نفس نصف الصفحة (التخطيط ثنائي العمود) لتفادي تلوّث العمود المجاور.
+        //  - الإنجليزية: الأرقام تقع يمين التسمية (LTR).
+        let colItems;
+        if (lang === "en") {
+          colItems = row.items.filter((it) => it.x >= label.x - 0.5);
+        } else {
+          const isRight = label.x >= mid;
+          colItems = row.items.filter((it) => (isRight ? it.x >= mid : it.x < mid));
+        }
         const nums = colItems
           .filter((it) => isNumberToken(it.str))
           .map((it) => Number(it.str))
@@ -448,9 +507,10 @@
 
     allRows = groupRows(allItems);
 
-    const student = extractHeader(allRows, pageWidth);
-    const courses = parseCourses(allRows, pageWidth);
-    const cumulativePrinted = extractCumulative(allRows, pageWidth);
+    const lang = detectLang(allItems); // "ar" أو "en"
+    const student = extractHeader(allRows, pageWidth, lang);
+    const courses = parseCourses(allRows, pageWidth, lang);
+    const cumulativePrinted = extractCumulative(allRows, pageWidth, lang);
 
     const completed = courses.filter((c) => !c.inProgress && !c.remedial);
     const remedialCourses = courses.filter((c) => c.remedial);
@@ -487,6 +547,7 @@
     }
 
     return {
+      lang,
       student,
       cumulative,
       cumulativePrinted,
@@ -494,11 +555,11 @@
       remedial: remedialCourses,
       current: currentUnique,
       _debug: {
-        rows: allRows.length, totalCourses: courses.length, pageWidth,
+        lang, rows: allRows.length, totalCourses: courses.length, pageWidth,
         computed, printed: cumulativePrinted,
       },
     };
   }
 
-  window.RecordParser = { parseRecord, arabicNormalize, fold };
+  window.RecordParser = { parseRecord, arabicNormalize, fold, detectLang };
 })();
