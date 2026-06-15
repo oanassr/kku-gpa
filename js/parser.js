@@ -374,36 +374,51 @@
   // ---- استخلاص الحالة التراكمية (نقطة انطلاق) --------------------------
 
   /**
-   * نبحث عن صفوف "تراكمي" ونستخرج منها: الساعات المكتسبة، النقاط، المعدل.
-   * نختار الصف ذا الساعات المكتسبة الأكبر (= الأحدث/الأشمل).
+   * نبحث عن صفوف "تراكمي" المطبوعة ونستخرج منها قيم الملخص لكل فصل.
+   * بنية صف التراكمي تحوي أرقاماً: النقاط، الساعات المسجّلة (عمود س)، المعدل، الساعات المكتسبة.
+   * الاستدلال:
+   *   - المعدل = القيمة ضمن (0, 5].
+   *   - النقاط = أكبر قيمة (> 5).
+   *   - الساعات المسجّلة (عمود س) = أكبر القيمتين المتبقيتين (تشمل التكميلية).
+   *   - الساعات المكتسبة = أصغرهما (الداخلة في المعدل).
+   * نختار صف آخر فصل مكتمل = الصف ذو معدل > 0 والأكبر بالساعات المكتسبة.
    */
-  function extractCumulative(rows) {
+  function extractCumulative(rows, pageWidth) {
+    const mid = (pageWidth || 857) / 2;
     const candidates = [];
     for (const row of rows) {
-      const tf = fold(rowText(row));
-      if (!tf.includes("تراكمي")) continue;
-      const nums = row.items
-        .filter((it) => isNumberToken(it.str))
-        .map((it) => Number(it.str));
-      if (nums.length === 0) continue;
-      candidates.push({ nums, y: row.y });
+      // قد يحتوي الصف على عمودين؛ نعالج كل تسمية "تراكمي" ضمن عمودها فقط
+      // لتفادي تلوّث الأرقام بترويسة العمود المجاور (مثل "الإنذارات: 1" و"1447").
+      const labels = row.items.filter((it) => fold(it.str).includes("تراكمي"));
+      if (labels.length === 0) continue;
+      for (const label of labels) {
+        const isRight = label.x >= mid;
+        const colItems = row.items.filter((it) => (isRight ? it.x >= mid : it.x < mid));
+        const nums = colItems
+          .filter((it) => isNumberToken(it.str))
+          .map((it) => Number(it.str))
+          .filter((n) => Number.isFinite(n));
+        if (nums.length === 0) continue;
+
+        const gpaCand = nums.filter((n) => n > 0 && n <= 5);
+        const gpa = gpaCand.length ? Math.max(...gpaCand) : 0;
+        const bigs = nums.filter((n) => n > 5).sort((a, b) => b - a);
+        const points = bigs.length ? bigs[0] : null;
+        const rest = bigs.slice(1);
+        const hoursRegistered = rest.length ? Math.max(...rest) : (bigs.length ? bigs[0] : null);
+        const hoursEarned = rest.length ? Math.min(...rest) : hoursRegistered;
+
+        candidates.push({ gpa, points, hoursRegistered, hoursEarned, y: row.y });
+      }
     }
     if (candidates.length === 0) return null;
 
-    // في كل صف تراكمي: المعدل قيمة ≤ سقف السلم (≤5)، الساعات والنقاط أكبر.
-    let best = null;
-    for (const c of candidates) {
-      const gpaCand = c.nums.filter((n) => n > 0 && n <= 5);
-      const big = c.nums.filter((n) => n > 5);
-      const gpa = gpaCand.length ? Math.min(...gpaCand) : null;
-      const hours = big.length ? Math.min(...big) : null; // الساعات أصغر من النقاط
-      const points = big.length ? Math.max(...big) : null;
-      const rec = { gpa, hours, points, y: c.y };
-      if (!best || (rec.hours || 0) >= (best.hours || 0)) best = rec;
-    }
-    // اتساق: النقاط ≈ المعدل × الساعات
-    if (best && best.gpa && best.hours && !best.points) {
-      best.points = best.gpa * best.hours;
+    // آخر فصل مكتمل: معدل > 0 وأكبر ساعات مكتسبة
+    const valid = candidates.filter((c) => c.gpa > 0 && c.hoursEarned);
+    const pool = valid.length ? valid : candidates;
+    let best = pool[0];
+    for (const c of pool) {
+      if ((c.hoursEarned || 0) >= (best.hoursEarned || 0)) best = c;
     }
     return best;
   }
@@ -435,7 +450,7 @@
 
     const student = extractHeader(allRows, pageWidth);
     const courses = parseCourses(allRows, pageWidth);
-    const cumulativePrinted = extractCumulative(allRows);
+    const cumulativePrinted = extractCumulative(allRows, pageWidth);
 
     const completed = courses.filter((c) => !c.inProgress && !c.remedial);
     const remedialCourses = courses.filter((c) => c.remedial);
@@ -451,14 +466,22 @@
       currentUnique.push(c);
     }
 
-    // الحالة التراكمية المعتمدة: تُحتسب من المقررات المكتملة (مع معالجة الإعادة).
-    // هذا أدق من القراءة المباشرة لصفوف الملخص (التي تتداخل في التخطيط ثنائي العمود).
+    // الحالة التراكمية المعتمدة: تُقرأ مباشرة من صف "تراكمي" المطبوع لآخر فصل مكتمل.
+    // الساعات السابقة = قيمة عمود (س) المسجّلة، والمعدل من نفس الصف، والنقاط تُشتق لاحقاً
+    // (الساعات × المعدل) تماشياً مع طريقة حاسبات الجامعات المرجعية.
+    // عند تعذّر القراءة المطبوعة نلجأ للاحتساب من المقررات المكتملة.
     const computed = computeCompletedTotals(completed, "5");
     let cumulative = null;
-    if (computed.hours > 0) {
+    if (cumulativePrinted && cumulativePrinted.gpa > 0 && cumulativePrinted.hoursRegistered) {
+      cumulative = {
+        gpa: cumulativePrinted.gpa,
+        hours: cumulativePrinted.hoursRegistered, // عمود (س) — الساعات المسجّلة
+        hoursEarned: cumulativePrinted.hoursEarned,
+        points: null, // يُشتق في الواجهة = الساعات × المعدل
+        source: "printed",
+      };
+    } else if (computed.hours > 0) {
       cumulative = { gpa: computed.gpa, hours: computed.hours, points: computed.points, source: "computed" };
-    } else if (cumulativePrinted) {
-      cumulative = { ...cumulativePrinted, source: "printed" };
     }
 
     return {
