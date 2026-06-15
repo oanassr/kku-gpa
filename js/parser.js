@@ -169,6 +169,75 @@
     return items.map((i) => i.str).join(" ");
   }
 
+  // ---- تصنيف خلية التقدير (محتسب / حالة) -------------------------------
+
+  const COUNTED_GRADES = new Set(["أ+", "أ", "ب+", "ب", "ج+", "ج", "د+", "د", "هـ"]);
+
+  // حالات المقرر غير المحتسبة (إنجليزي + عربي)
+  const STATUS_OF = {
+    "W": "withdrawn", "WP": "withdrawn", "WF": "fail",
+    "NP": "nopass", "NF": "absent", "DN": "denied", "AU": "audit",
+    "IP": "inprogress", "IC": "inprogress",
+    "ع": "excused", "ح": "absent", "ل": "withdrawn", "ند": "nopass",
+    "م": "inprogress", "غ": "absent", "مستمر": "inprogress",
+    "منسحب": "withdrawn", "محروم": "absent", "غائب": "absent", "راسب": "fail",
+  };
+
+  // الحالات المستبعَدة من عرض مقررات الفصل الأخير (غائب/راسب/منسحب/غير ناجح)
+  const EXCLUDE_FROM_CURRENT = new Set(["fail", "absent", "withdrawn", "nopass", "denied", "audit", "excused"]);
+
+  // يُصنّف رمزاً في عمود التقدير: يُرجع {grade, status, raw} أو null إن لم يكن خلية تقدير.
+  function classifyGradeCell(s) {
+    const t = s.replace(/\s+/g, "");
+    if (!t) return null;
+    const g = normalizeGrade(t); // EN→AR، "+ب"→"ب+"، إلخ
+    if (COUNTED_GRADES.has(g)) return { grade: g, status: g === "هـ" ? "fail" : "pass", raw: t };
+    const up = t.toUpperCase();
+    if (STATUS_OF[up]) return { grade: "", status: STATUS_OF[up], raw: t };
+    if (STATUS_OF[t]) return { grade: "", status: STATUS_OF[t], raw: t };
+    return null;
+  }
+
+  // ---- التعرّف على الفصول الدراسية (لتحديد آخر فصل) --------------------
+
+  // يحوّل نص ترويسة فصل إلى مفتاح ترتيبي: السنة×10 + رقم الفصل.
+  function parseTermKey(txt) {
+    let m = txt.match(/(First|Second|Third|Fourth|Summer)\s+Semester\s+(\d{4})\s*\/\s*\d{4}/i);
+    if (m) {
+      const tn = { first: 1, second: 2, third: 3, fourth: 3, summer: 4 }[m[1].toLowerCase()];
+      return parseInt(m[2], 10) * 10 + tn;
+    }
+    const f = fold(txt);
+    m = f.match(/الفصل\s+(الاول|الثاني|الثالث|الرابع|الصيفي)\s+(\d{3,4})/);
+    if (m) {
+      const tn = { "الاول": 1, "الثاني": 2, "الثالث": 3, "الرابع": 3, "الصيفي": 4 }[m[1]];
+      return parseInt(m[2], 10) * 10 + tn;
+    }
+    return null;
+  }
+
+  // يكتشف ترويسات الفصول في صف (قد تكون عموداً أو عمودين) مع مواضعها الأفقية.
+  function detectTerms(row) {
+    const items = row.items.slice().sort((a, b) => a.x - b.x);
+    // تجميع حسب الفجوات الأفقية لعزل العمودين
+    const segs = [];
+    let cur = [];
+    for (const it of items) {
+      if (cur.length && it.x - cur[cur.length - 1].xEnd > 30) { segs.push(cur); cur = []; }
+      cur.push(it);
+    }
+    if (cur.length) segs.push(cur);
+
+    const terms = [];
+    for (const seg of segs) {
+      const txtEn = seg.slice().sort((a, b) => a.x - b.x).map((i) => i.str).join(" ");
+      const txtAr = seg.slice().sort((a, b) => b.x - a.x).map((i) => i.str).join(" ");
+      const key = parseTermKey(txtEn) || parseTermKey(txtAr);
+      if (key) terms.push({ x: Math.min(...seg.map((s) => s.x)), key });
+    }
+    return terms;
+  }
+
   // ---- استخلاص الترويسة (بيانات الطالب) --------------------------------
 
   function escapeRe(s) {
@@ -242,7 +311,7 @@
 
     const grabText = (keys) => {
       for (const k of keys) {
-        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z .'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||$)", "i");
+        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z .,'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||$)", "i");
         const m = fullText.match(re);
         if (m && m[1] && m[1].trim().length > 1) return cleanVal(m[1]);
       }
@@ -281,7 +350,6 @@
    *   رمز المقرر (x الأكبر) ← اسم المقرر ← التقدير ← الساعات ← النقاط (x الأصغر).
    */
   function parseCourses(rows, pageWidth, lang) {
-    const mid = pageWidth / 2;
     const courses = [];
 
     // تتبّع حالة "المقررات التكميلية / Remedial" حسب الموضع الرأسي
@@ -289,8 +357,15 @@
     const remStartF = KW.remedialStart.map(fold);
     const remEndF = KW.remedialEnd.map(fold);
 
+    // أعمدة الفصول النشطة حالياً: [{x, key}] — تُحدَّث عند كل صف ترويسة فصل.
+    let columns = [];
+
     for (const row of rows) {
       const tf = fold(rowText(row, lang));
+
+      // تحديث أعمدة الفصول إن كان هذا الصف ترويسة فصل/فصول
+      const terms = detectTerms(row);
+      if (terms.length) columns = terms;
 
       if (remStartF.some((k) => tf.includes(k)) && !tf.includes(fold("نهاية")) && !/end of/i.test(tf)) {
         remedial = true;
@@ -321,10 +396,23 @@
         }
         const colItems = row.items.filter((it) => it.x > lo && it.x < hi);
         const course = buildCourse(codeItem, colItems, remedial, lang);
-        if (course) courses.push(course);
+        if (!course) continue;
+        // إسناد الفصل: أقرب عمود ترويسة أفقياً لرمز المقرر
+        course.termKey = nearestTermKey(codeItem.x, columns);
+        courses.push(course);
       }
     }
     return courses;
+  }
+
+  function nearestTermKey(x, columns) {
+    if (!columns || !columns.length) return null;
+    let best = columns[0], bd = Math.abs(x - columns[0].x);
+    for (const c of columns) {
+      const d = Math.abs(x - c.x);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best.key;
   }
 
   function buildCourse(codeItem, colItems, remedial, lang) {
@@ -332,6 +420,8 @@
     const ordered = colItems.slice().sort((a, b) => b.x - a.x);
 
     let grade = "";
+    let status = "blank";
+    let gradeFound = false;
     let hours = null;
     let points = null;
     const nameParts = [];
@@ -339,7 +429,10 @@
     for (const it of ordered) {
       if (it === codeItem) continue;
       const s = it.str;
-      if (!grade && isGradeToken(s)) { grade = normalizeGrade(s); continue; }
+      if (!gradeFound) {
+        const cls = classifyGradeCell(s);
+        if (cls) { grade = cls.grade; status = cls.status; gradeFound = true; continue; }
+      }
       if (isNumberToken(s)) {
         const n = Number(s.replace(/\s+/g, ""));
         if (hours === null && Number.isInteger(n) && n >= 1 && n <= 12 && !s.includes(".")) {
@@ -360,17 +453,17 @@
       .replace(/\s+/g, " ")
       .trim();
 
-    if (!name && hours === null && !grade) return null;
+    if (!name && hours === null && !gradeFound) return null;
 
-    const hasGrade = !!grade && grade !== "م";
     return {
       code,
       name: name || (lang === "en" ? "(no name)" : "(بدون اسم)"),
-      grade: hasGrade ? grade : "",
+      grade, // محتسب فقط (أ+..هـ)، فارغ للحالات غير المحتسبة
+      status, // pass | fail | absent | withdrawn | nopass | inprogress | blank ...
       hours: hours || 0,
       points: points,
       remedial,
-      inProgress: !hasGrade, // بلا تقدير = مسجّل حالياً / جارٍ
+      inProgress: status === "blank" || status === "inprogress",
     };
   }
 
@@ -440,15 +533,17 @@
       const labels = row.items.filter((it) => {
         const f = fold(it.str);
         return f.includes("تراكمي") || /cumulative|cum\b/i.test(it.str);
-      });
+      }).sort((a, b) => a.x - b.x);
       if (labels.length === 0) continue;
-      for (const label of labels) {
+      for (let li = 0; li < labels.length; li++) {
+        const label = labels[li];
         // اختيار خلايا الملخّص حسب الاتجاه:
         //  - العربية: نفس نصف الصفحة (التخطيط ثنائي العمود) لتفادي تلوّث العمود المجاور.
-        //  - الإنجليزية: الأرقام تقع يمين التسمية (LTR).
+        //  - الإنجليزية: الأرقام تقع يمين التسمية حتى تسمية العمود التالي (LTR).
         let colItems;
         if (lang === "en") {
-          colItems = row.items.filter((it) => it.x >= label.x - 0.5);
+          const hiX = li + 1 < labels.length ? labels[li + 1].x - 0.5 : Infinity;
+          colItems = row.items.filter((it) => it.x >= label.x - 0.5 && it.x < hiX);
         } else {
           const isRight = label.x >= mid;
           colItems = row.items.filter((it) => (isRight ? it.x >= mid : it.x < mid));
@@ -512,11 +607,29 @@
     const courses = parseCourses(allRows, pageWidth, lang);
     const cumulativePrinted = extractCumulative(allRows, pageWidth, lang);
 
-    const completed = courses.filter((c) => !c.inProgress && !c.remedial);
     const remedialCourses = courses.filter((c) => c.remedial);
-    const current = courses.filter((c) => c.inProgress && !c.remedial);
 
-    // إزالة التكرار من المقررات الحالية (قد تتكرر بين الفصول)
+    // تحديد آخر فصل دراسي عبر أكبر مفتاح فصل (السنة×10 + رقم الفصل)
+    const termKeys = courses.filter((c) => !c.remedial && c.termKey != null).map((c) => c.termKey);
+    const maxTermKey = termKeys.length ? Math.max(...termKeys) : null;
+
+    let current;
+    if (maxTermKey != null) {
+      // مقررات الفصل الأخير، مع استبعاد الغائب/الراسب/المنسحب/غير الناجح
+      current = courses.filter(
+        (c) => !c.remedial && c.termKey === maxTermKey && !EXCLUDE_FROM_CURRENT.has(c.status)
+      );
+    } else {
+      // احتياطي: لا فصول مكتشفة → المقررات الجارية (بلا تقدير)
+      current = courses.filter((c) => c.inProgress && !c.remedial);
+    }
+
+    // المقررات المكتملة (المحتسبة) من الفصول السابقة — للعرض الاطلاعي والاحتساب الاحتياطي
+    const completed = courses.filter(
+      (c) => c.grade && !c.remedial && (maxTermKey == null || c.termKey !== maxTermKey)
+    );
+
+    // إزالة التكرار من مقررات الفصل الأخير
     const seen = new Set();
     const currentUnique = [];
     for (const c of current) {
