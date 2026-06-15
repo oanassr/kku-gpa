@@ -472,12 +472,14 @@
     // عند تعذّر القراءة المطبوعة نلجأ للاحتساب من المقررات المكتملة.
     const computed = computeCompletedTotals(completed, "5");
     let cumulative = null;
-    if (cumulativePrinted && cumulativePrinted.gpa > 0 && cumulativePrinted.hoursRegistered) {
+    if (cumulativePrinted && cumulativePrinted.gpa > 0 && (cumulativePrinted.hoursEarned || cumulativePrinted.hoursRegistered)) {
+      // للحصول على حساب دقيق مطابق للعمادة نستخدم الساعات المكتسبة مع النقاط المطبوعة،
+      // لأن المعدل التراكمي الرسمي = النقاط ÷ الساعات المكتسبة (المقررات التكميلية لا تُحتسب).
       cumulative = {
         gpa: cumulativePrinted.gpa,
-        hours: cumulativePrinted.hoursRegistered, // عمود (س) — الساعات المسجّلة
-        hoursEarned: cumulativePrinted.hoursEarned,
-        points: cumulativePrinted.points, // أسفل عمود النقاط المطبوع (القيمة المجاورة للساعات)
+        hours: cumulativePrinted.hoursEarned || cumulativePrinted.hoursRegistered, // الساعات المكتسبة
+        hoursRegistered: cumulativePrinted.hoursRegistered, // عمود (س) — للعرض/المرجع
+        points: cumulativePrinted.points, // أسفل عمود النقاط المطبوع
         source: "printed",
       };
     } else if (computed.hours > 0) {
