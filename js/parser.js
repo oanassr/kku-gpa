@@ -477,7 +477,7 @@
         gpa: cumulativePrinted.gpa,
         hours: cumulativePrinted.hoursRegistered, // عمود (س) — الساعات المسجّلة
         hoursEarned: cumulativePrinted.hoursEarned,
-        points: null, // يُشتق في الواجهة = الساعات × المعدل
+        points: cumulativePrinted.points, // أسفل عمود النقاط المطبوع (القيمة المجاورة للساعات)
         source: "printed",
       };
     } else if (computed.hours > 0) {
