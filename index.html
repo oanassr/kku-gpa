@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>حاسبة المعدل الفصلي والتراكمي — جامعة الملك خالد</title>
+  <meta name="description" content="حاسبة معتمدة للمعدل الفصلي والتراكمي لطلاب جامعة الملك خالد، مع قراءة السجل الأكاديمي PDF تلقائياً. تعمل بالكامل داخل المتصفح دون حفظ أي بيانات." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;800&family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml" />
+</head>
+<body>
+  <!-- ============================ الترويسة ============================ -->
+  <header class="site-header" role="banner">
+    <div class="container header-inner">
+      <div class="brand">
+        <img src="assets/logo.svg" alt="شعار" class="brand-logo" />
+        <div class="brand-text">
+          <h1>حاسبة المعدل التراكمي</h1>
+          <p>جامعة الملك خالد — احتساب المعدل الفصلي والتراكمي</p>
+        </div>
+      </div>
+      <div class="header-tools">
+        <div class="scale-toggle" role="group" aria-label="نظام المعدل">
+          <span class="scale-label">السلّم:</span>
+          <button class="scale-btn is-active" data-scale="5">من 5.00</button>
+          <button class="scale-btn" data-scale="4">من 4.00</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container" id="app">
+
+    <!-- ============================ مقدمة ============================ -->
+    <section class="hero">
+      <div class="hero-text">
+        <h2>احسب معدّلك بثقة <span class="accent">واحترافية</span></h2>
+        <p>
+          ارفع سجلك الأكاديمي بصيغة PDF ليتم استخلاص بياناتك ومقرراتك المسجّلة
+          تلقائياً، ثم أدخل الدرجات المتوقعة لتحصل على معدّلك الفصلي والتراكمي
+          المتوقّع وتقرير قابل للطباعة.
+        </p>
+        <ul class="hero-points">
+          <li>📄 قراءة تلقائية للسجل الأكاديمي PDF</li>
+          <li>🔒 المعالجة داخل متصفحك — لا يتم حفظ أو رفع أي بيانات</li>
+          <li>🧮 معدل فصلي وتراكمي متوقّع لحظياً</li>
+          <li>🖨️ تقرير معتمد قابل للطباعة</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- ============================ منطقة الرفع ============================ -->
+    <section class="card upload-card" id="uploadSection">
+      <div class="dropzone" id="dropzone" tabindex="0" role="button"
+           aria-label="ارفع ملف السجل الأكاديمي PDF">
+        <input type="file" id="fileInput" accept="application/pdf,.pdf" hidden />
+        <div class="dropzone-inner">
+          <svg class="dz-icon" viewBox="0 0 24 24" width="56" height="56" aria-hidden="true">
+            <path fill="currentColor" d="M19 13v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6h2v6h10v-6h2zM11 7.83 8.41 10.4 7 9l5-5 5 5-1.41 1.41L13 7.83V16h-2V7.83z"/>
+          </svg>
+          <p class="dz-title">اسحب ملف السجل الأكاديمي هنا أو اضغط للاختيار</p>
+          <p class="dz-sub">صيغة PDF فقط — يُقرأ محلياً داخل جهازك</p>
+        </div>
+      </div>
+      <div class="upload-actions">
+        <button class="btn btn-ghost" id="manualBtn">أو ابدأ يدوياً بدون ملف</button>
+        <span class="privacy-pill">🔒 لا نحتفظ بأي بيانات للطالب</span>
+      </div>
+      <div class="parse-status" id="parseStatus" hidden></div>
+    </section>
+
+    <!-- ============================ قسم المراجعة ============================ -->
+    <section id="reviewSection" hidden>
+
+      <!-- بيانات الطالب -->
+      <div class="card">
+        <div class="card-head">
+          <h3>① بيانات الطالب</h3>
+          <span class="hint">يمكنك تعديل أي حقل</span>
+        </div>
+        <div class="grid student-grid">
+          <label>الاسم<input type="text" id="st_name" placeholder="اسم الطالب/ة" /></label>
+          <label>الرقم الجامعي<input type="text" id="st_id" placeholder="—" /></label>
+          <label>التخصص<input type="text" id="st_major" placeholder="—" /></label>
+          <label>الكلية<input type="text" id="st_college" placeholder="—" /></label>
+          <label>الدرجة<input type="text" id="st_degree" placeholder="—" /></label>
+          <label>تاريخ السجل<input type="text" id="st_date" placeholder="—" /></label>
+        </div>
+      </div>
+
+      <!-- الحالة التراكمية السابقة -->
+      <div class="card">
+        <div class="card-head">
+          <h3>② الحالة التراكمية السابقة</h3>
+          <span class="hint">نقطة الانطلاق لحساب التراكمي الجديد — مستخلصة من السجل وقابلة للتعديل</span>
+        </div>
+        <div class="grid prev-grid">
+          <label>الساعات المكتسبة سابقاً
+            <input type="number" id="prev_hours" min="0" step="1" placeholder="0" />
+          </label>
+          <label>المعدل التراكمي السابق
+            <input type="number" id="prev_gpa" min="0" step="0.01" placeholder="0.00" />
+          </label>
+          <label>مجموع النقاط السابق
+            <input type="number" id="prev_points" min="0" step="0.01" placeholder="0.00" />
+            <small class="field-note">يُحسب تلقائياً = المعدل × الساعات</small>
+          </label>
+        </div>
+      </div>
+
+      <!-- المقررات الحالية -->
+      <div class="card">
+        <div class="card-head">
+          <h3>③ مقررات الفصل الحالي</h3>
+          <span class="hint">أدخل الدرجة المتوقعة (من 100) ويُحتسب التقدير تلقائياً — أو اختر التقدير مباشرة</span>
+        </div>
+        <div class="table-wrap">
+          <table class="courses-table" id="currentTable">
+            <thead>
+              <tr>
+                <th class="col-name">اسم المقرر</th>
+                <th class="col-code">الرمز</th>
+                <th class="col-score">الدرجة (من 100)</th>
+                <th class="col-grade">التقدير</th>
+                <th class="col-hours">الساعات</th>
+                <th class="col-points">النقاط</th>
+                <th class="col-act"></th>
+              </tr>
+            </thead>
+            <tbody id="currentBody"><!-- صفوف ديناميكية --></tbody>
+          </table>
+        </div>
+        <button class="btn btn-soft" id="addCourseBtn">＋ إضافة مقرر</button>
+      </div>
+
+      <!-- المقررات المكتملة (اطلاعي) -->
+      <div class="card" id="completedCard">
+        <div class="card-head collapsible" id="completedToggle">
+          <h3>④ المقررات المكتملة سابقاً <span class="count-badge" id="completedCount">0</span></h3>
+          <span class="chev">▾</span>
+        </div>
+        <div class="collapse-body" id="completedBody">
+          <p class="hint mb">هذه المقررات للاطلاع فقط، وهي محتسبة ضمن الحالة التراكمية السابقة أعلاه.</p>
+          <div class="table-wrap">
+            <table class="courses-table compact">
+              <thead>
+                <tr><th>اسم المقرر</th><th>الرمز</th><th>التقدير</th><th>الساعات</th><th>النقاط</th></tr>
+              </thead>
+              <tbody id="completedTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============================ النتائج ============================ -->
+    <section id="resultsSection" hidden>
+      <div class="card results-card">
+        <div class="card-head">
+          <h3>📊 النتيجة المتوقعة</h3>
+          <span class="hint">تتحدّث لحظياً مع كل تعديل</span>
+        </div>
+        <div class="results-grid">
+          <div class="result-block semester">
+            <span class="rb-label">المعدل الفصلي</span>
+            <span class="rb-value" id="r_sem_gpa">—</span>
+            <span class="rb-meta"><span id="r_sem_hours">0</span> ساعة · <span id="r_sem_points">0</span> نقطة</span>
+            <span class="rb-standing" id="r_sem_standing">—</span>
+          </div>
+          <div class="result-block cumulative">
+            <span class="rb-label">المعدل التراكمي المتوقع</span>
+            <span class="rb-value" id="r_cum_gpa">—</span>
+            <span class="rb-meta"><span id="r_cum_hours">0</span> ساعة · <span id="r_cum_points">0</span> نقطة</span>
+            <span class="rb-standing" id="r_cum_standing">—</span>
+          </div>
+        </div>
+        <div class="results-actions">
+          <button class="btn btn-primary" id="printBtn">🖨️ طباعة التقرير المعتمد</button>
+          <button class="btn btn-ghost" id="resetBtn">↺ بدء من جديد</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ سلّم التقديرات ============================ -->
+    <section class="card scale-info" id="scaleInfo">
+      <div class="card-head collapsible" id="scaleToggle">
+        <h3>سلّم التقديرات والنقاط</h3>
+        <span class="chev">▾</span>
+      </div>
+      <div class="collapse-body" id="scaleBody">
+        <div class="table-wrap">
+          <table class="scale-table" id="scaleTable"><!-- يُبنى ديناميكياً --></table>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>أداة مساعدة غير رسمية لاحتساب المعدل — تعتمد على السلّم المعتمد بنظام النقاط. تُجرى كل العمليات داخل متصفحك ولا يتم حفظ أو إرسال أي بيانات.</p>
+      <p class="muted">يُرجى اعتماد النتائج الرسمية الصادرة من عمادة القبول والتسجيل عند الحاجة.</p>
+    </div>
+  </footer>
+
+  <!-- قالب التقرير المطبوع (يُملأ عند الطباعة) -->
+  <div id="printReport" class="print-report" hidden></div>
+
+  <!-- السكربتات -->
+  <script src="js/gpa.js"></script>
+  <script src="js/parser.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
