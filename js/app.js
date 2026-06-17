@@ -148,7 +148,8 @@ function applyParsed(data) {
   $("#currentBody").innerHTML = "";
   const list = (data.current && data.current.length) ? data.current : [];
   if (list.length) {
-    list.forEach((c) => addCourseRow({ name: c.name, code: c.code, hours: c.hours, grade: "" }));
+    // نمرّر التقدير المرصود (إن وُجد) ليظهر مُعبّأً مسبقاً لمقررات الفصل الأخير المرصود لها درجات
+    list.forEach((c) => addCourseRow({ name: c.name, code: c.code, hours: c.hours, grade: c.grade || "" }));
   } else {
     addCourseRow();
   }
