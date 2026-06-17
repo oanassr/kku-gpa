@@ -31,6 +31,7 @@ document.addEventListener("DOMContentLoaded", () => {
   bindManual();
   bindCollapsibles();
   bindResultsActions();
+  bindTarget();
   $("#addCourseBtn").addEventListener("click", () => {
     addCourseRow();
     recompute();
@@ -130,6 +131,9 @@ function applyParsed(data) {
   $("#st_degree").value = state.student.degree || "";
   $("#st_date").value = state.student.printDate || "";
 
+  // قيمة الهدف الافتراضية حسب الدرجة (بكالوريوس 2.00 / دراسات عليا 3.75)
+  $("#targetGpa").value = defaultTargetForDegree(state.student.degree);
+
   // الحالة التراكمية السابقة
   if (data.cumulative) {
     const c = data.cumulative;
@@ -218,7 +222,7 @@ function addCourseRow(data = {}) {
   tr.querySelector(".f-name").addEventListener("input", (e) => { course.name = e.target.value; });
   tr.querySelector(".f-code").addEventListener("input", (e) => { course.code = e.target.value; });
   tr.querySelector(".f-score").addEventListener("input", (e) => { course.score = e.target.value; recompute(); });
-  tr.querySelector(".f-grade").addEventListener("change", (e) => { course.grade = e.target.value; recompute(); });
+  tr.querySelector(".f-grade").addEventListener("change", (e) => { course.grade = e.target.value; course.autoFilled = false; recompute(); });
   tr.querySelector(".f-hours").addEventListener("input", (e) => { course.hours = e.target.value; recompute(); });
   tr.querySelector(".row-del").addEventListener("click", () => {
     state.currentCourses = state.currentCourses.filter((c) => c.id !== id);
@@ -364,6 +368,111 @@ function bindResultsActions() {
   $("#resetBtn").addEventListener("click", () => {
     if (confirm("سيتم مسح كل المدخلات والبدء من جديد. متابعة؟")) location.reload();
   });
+}
+
+// ----------------------------- الهدف العكسي (معدل مستهدف) -----------------
+function bindTarget() {
+  $$(".chip-btn").forEach((btn) =>
+    btn.addEventListener("click", () => {
+      $("#targetGpa").value = btn.dataset.target;
+      $$(".chip-btn").forEach((b) => b.classList.remove("is-active"));
+      btn.classList.add("is-active");
+      calcTarget();
+    })
+  );
+  $("#calcTargetBtn").addEventListener("click", calcTarget);
+}
+
+// يضع قيمة هدف افتراضية حسب الدرجة (بكالوريوس 2.00 / دراسات عليا 3.75)
+function defaultTargetForDegree(degree) {
+  const d = (degree || "").toLowerCase();
+  const grad = /ماجستير|دكتوراه|دبلوم عالي|عليا|master|phd|doctor|graduate/.test(d);
+  return grad ? "3.75" : "2.00";
+}
+
+/**
+ * يحسب التقدير الموحّد المطلوب في المقررات المتبقية (بلا تقدير/درجة) لبلوغ معدل تراكمي مستهدف،
+ * ثم يُعبّئها به. يأخذ في الحسبان المقررات المرصودة (الثابتة) والحالة التراكمية السابقة.
+ */
+function calcTarget() {
+  const out = $("#targetResult");
+  const T = parseFloat($("#targetGpa").value);
+  const scaleArr = GPA.GRADE_SCALES[state.scale];
+  const maxV = scaleArr[0].value;
+  const minV = scaleArr[scaleArr.length - 1].value;
+
+  const show = (cls, html) => { out.hidden = false; out.className = "target-result " + cls; out.innerHTML = html; };
+
+  if (!Number.isFinite(T) || T <= 0) { show("warn", "أدخل معدلاً تراكمياً مستهدفاً صحيحاً."); return; }
+  if (T > maxV) { show("bad", `المعدل المستهدف لا يمكن أن يتجاوز سقف السلّم (${maxV.toFixed(2)}).`); return; }
+
+  // الحالة السابقة
+  const prevPts = Number(state.prev.points) || 0;
+  const prevHrs = Number(state.prev.hours) || 0;
+
+  // تقسيم مقررات الفصل: مرصودة (تقدير/درجة) ثابتة، ومتبقية (فارغة) قابلة للتعبئة
+  let fixedPts = 0, fixedHrs = 0, ungrHrs = 0, ungrCount = 0;
+  const ungraded = [];
+  for (const c of state.currentCourses) {
+    const h = parseFloat(c.hours) || 0;
+    if (h <= 0) continue;
+    const hasScore = c.score !== "" && c.score != null && !isNaN(parseFloat(c.score));
+    // المقررات القابلة للتعبئة: بلا درجة فعلية مُدخلة من المستخدم (تشمل ما عبّأه الهدف سابقاً)
+    const fillable = !hasScore && (!c.grade || c.autoFilled);
+    const g = fillable ? null : (hasScore ? GPA.gradeFromScore(c.score, state.scale) : GPA.findGrade(c.grade, state.scale));
+    if (g) { fixedPts += g.value * h; fixedHrs += h; }
+    else { ungrHrs += h; ungrCount++; ungraded.push(c); }
+  }
+
+  const totalHrs = prevHrs + fixedHrs + ungrHrs;
+  if (totalHrs <= 0) { show("warn", "لا توجد ساعات لاحتساب المطلوب."); return; }
+
+  if (ungrHrs <= 0) {
+    const proj = (prevPts + fixedPts) / totalHrs;
+    const okNow = proj >= T;
+    show(okNow ? "ok" : "bad",
+      `لا توجد مقررات بلا تقدير لتعبئتها. المعدل التراكمي المتوقع الحالي <b>${GPA.fmt(proj)}</b> ` +
+      (okNow ? "≥ المستهدف ✓" : `أقل من المستهدف <b>${GPA.fmt(T)}</b>.`));
+    return;
+  }
+
+  // النقاط المطلوبة من المقررات المتبقية ثم متوسط التقدير المطلوب لكل منها
+  const needFromUngraded = T * totalHrs - prevPts - fixedPts;
+  const reqAvg = needFromUngraded / ungrHrs;
+  const reqSemGpa = (T * totalHrs - prevPts) / (fixedHrs + ungrHrs); // معدل فصلي مطلوب (شامل المرصود)
+
+  if (reqAvg <= minV) {
+    show("ok",
+      `🎉 مضمون: ستحقّق معدلاً تراكمياً <b>${GPA.fmt(T)}</b> حتى لو حصلت على أدنى تقدير في المقررات المتبقية (${ungrCount}).`);
+    return;
+  }
+  if (reqAvg > maxV + 1e-9) {
+    show("bad",
+      `يتعذّر بلوغ <b>${GPA.fmt(T)}</b> هذا الفصل: تحتاج إلى متوسط <b>${GPA.fmt(reqAvg)}</b> في المقررات المتبقية، ` +
+      `وهو أعلى من سقف السلّم (${maxV.toFixed(2)}).`);
+    return;
+  }
+
+  // أصغر تقدير قيمته ≥ المتوسط المطلوب
+  let reqGrade = scaleArr[0];
+  for (const g of scaleArr) { if (g.value >= reqAvg - 1e-9) reqGrade = g; }
+
+  // تعبئة المقررات المتبقية بهذا التقدير (مع وسمها كمعبّأة آلياً لإعادة الاحتساب لاحقاً)
+  ungraded.forEach((c) => { c.grade = reqGrade.ar; c.autoFilled = true; });
+  $$("#currentBody tr").forEach((tr) => {
+    const course = state.currentCourses.find((c) => c.id === tr.dataset.id);
+    if (course && ungraded.includes(course)) {
+      const sel = tr.querySelector(".f-grade");
+      sel.value = reqGrade.ar; sel.disabled = false; sel.classList.remove("auto");
+    }
+  });
+  recompute();
+
+  show("ok",
+    `للوصول إلى معدل تراكمي <b>${GPA.fmt(T)}</b> تحتاج إلى <b>${reqGrade.ar} (${reqGrade.en} — ${reqGrade.value.toFixed(2)})</b> ` +
+    `على الأقل في كل مقرر من المقررات المتبقية (${ungrCount}). ` +
+    `المتوسط الدقيق المطلوب ≈ <b>${GPA.fmt(reqAvg)}</b>، والمعدل الفصلي المطلوب ≈ <b>${GPA.fmt(reqSemGpa)}</b>. ` +
+    `تم تعبئة التقديرات المطلوبة في الجدول.`);
 }
 
 // ----------------------------- تقرير الطباعة -----------------------------
