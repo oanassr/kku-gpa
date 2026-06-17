@@ -4,20 +4,20 @@
  * ========================================================================= */
 
 :root {
-  /* ألوان مستوحاة من هوية جامعة الملك خالد */
-  --kku-navy: #0c2a4d;
-  --kku-blue: #144d8c;
-  --kku-teal: #0b7a8c;
-  --kku-teal-2: #119aa8;
+  /* ألوان هوية جامعة الملك خالد (الأخضر المزرقّ + الذهبي) */
+  --kku-navy: #06433f;   /* أخضر مزرقّ غامق (للترويسات والنصوص الداكنة) */
+  --kku-blue: #0a7d72;   /* أخضر مزرقّ متوسط */
+  --kku-teal: #109488;   /* اللون الأساسي */
+  --kku-teal-2: #2bb3a3; /* فاتح */
   --kku-gold: #c9a227;
   --kku-gold-soft: #e7c95a;
 
-  --bg: #f4f7fb;
+  --bg: #f2f8f6;
   --surface: #ffffff;
-  --surface-2: #f0f5fa;
-  --ink: #16263a;
-  --ink-soft: #51637a;
-  --line: #dde6f0;
+  --surface-2: #eef6f4;
+  --ink: #15302c;
+  --ink-soft: #506762;
+  --line: #d7e7e3;
   --ok: #1f9d63;
   --warn: #d98324;
   --danger: #d64545;
@@ -166,7 +166,7 @@ input, select {
   padding: 10px 12px; background: var(--surface); transition: .15s; width: 100%;
 }
 input:focus, select:focus {
-  outline: none; border-color: var(--kku-teal); box-shadow: 0 0 0 3px rgba(11,122,140,.12);
+  outline: none; border-color: var(--kku-teal); box-shadow: 0 0 0 3px rgba(16,148,136,.15);
 }
 .field-note { font-weight: 500; color: var(--ink-soft); font-size: .72rem; }
 

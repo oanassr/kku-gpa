@@ -221,7 +221,7 @@ function addCourseRow(data = {}) {
   // ربط الأحداث
   tr.querySelector(".f-name").addEventListener("input", (e) => { course.name = e.target.value; });
   tr.querySelector(".f-code").addEventListener("input", (e) => { course.code = e.target.value; });
-  tr.querySelector(".f-score").addEventListener("input", (e) => { course.score = e.target.value; recompute(); });
+  tr.querySelector(".f-score").addEventListener("input", (e) => { course.score = e.target.value; course.autoFilled = false; recompute(); });
   tr.querySelector(".f-grade").addEventListener("change", (e) => { course.grade = e.target.value; course.autoFilled = false; recompute(); });
   tr.querySelector(".f-hours").addEventListener("input", (e) => { course.hours = e.target.value; recompute(); });
   tr.querySelector(".row-del").addEventListener("click", () => {
@@ -417,8 +417,8 @@ function calcTarget() {
     const h = parseFloat(c.hours) || 0;
     if (h <= 0) continue;
     const hasScore = c.score !== "" && c.score != null && !isNaN(parseFloat(c.score));
-    // المقررات القابلة للتعبئة: بلا درجة فعلية مُدخلة من المستخدم (تشمل ما عبّأه الهدف سابقاً)
-    const fillable = !hasScore && (!c.grade || c.autoFilled);
+    // القابلة للتعبئة: ما عبّأه الهدف آلياً (يُعاد احتسابه)، أو الفارغة تماماً (بلا درجة ولا تقدير)
+    const fillable = c.autoFilled || (!hasScore && !c.grade);
     const g = fillable ? null : (hasScore ? GPA.gradeFromScore(c.score, state.scale) : GPA.findGrade(c.grade, state.scale));
     if (g) { fixedPts += g.value * h; fixedHrs += h; }
     else { ungrHrs += h; ungrCount++; ungraded.push(c); }
@@ -457,22 +457,23 @@ function calcTarget() {
   let reqGrade = scaleArr[0];
   for (const g of scaleArr) { if (g.value >= reqAvg - 1e-9) reqGrade = g; }
 
-  // تعبئة المقررات المتبقية بهذا التقدير (مع وسمها كمعبّأة آلياً لإعادة الاحتساب لاحقاً)
-  ungraded.forEach((c) => { c.grade = reqGrade.ar; c.autoFilled = true; });
+  // تعبئة المقررات المتبقية بالدرجة (الحد الأدنى لبلوغ التقدير) والتقدير معاً، ووسمها كمعبّأة آلياً
+  const reqScore = reqGrade.min; // أدنى درجة (من 100) تحقّق التقدير المطلوب
+  ungraded.forEach((c) => { c.score = String(reqScore); c.grade = reqGrade.ar; c.autoFilled = true; });
   $$("#currentBody tr").forEach((tr) => {
     const course = state.currentCourses.find((c) => c.id === tr.dataset.id);
     if (course && ungraded.includes(course)) {
-      const sel = tr.querySelector(".f-grade");
-      sel.value = reqGrade.ar; sel.disabled = false; sel.classList.remove("auto");
+      tr.querySelector(".f-score").value = reqScore; // تُملأ الدرجة، ويُشتق التقدير ويُقفل تلقائياً
     }
   });
   recompute();
 
+  const scoreTxt = reqGrade.max >= 100 ? `${reqGrade.min}` : `${reqGrade.min}`;
   show("ok",
-    `للوصول إلى معدل تراكمي <b>${GPA.fmt(T)}</b> تحتاج إلى <b>${reqGrade.ar} (${reqGrade.en} — ${reqGrade.value.toFixed(2)})</b> ` +
-    `على الأقل في كل مقرر من المقررات المتبقية (${ungrCount}). ` +
+    `للوصول إلى معدل تراكمي <b>${GPA.fmt(T)}</b> تحتاج في كل مقرر من المقررات المتبقية (${ungrCount}) إلى ` +
+    `درجة <b>${scoreTxt}</b> من 100 على الأقل (تقدير <b>${reqGrade.ar} — ${reqGrade.en}</b>). ` +
     `المتوسط الدقيق المطلوب ≈ <b>${GPA.fmt(reqAvg)}</b>، والمعدل الفصلي المطلوب ≈ <b>${GPA.fmt(reqSemGpa)}</b>. ` +
-    `تم تعبئة التقديرات المطلوبة في الجدول.`);
+    `تم تعبئة الدرجات والتقديرات في الجدول، وتحديث المعدلين أعلاه وفي التقرير.`);
 }
 
 // ----------------------------- تقرير الطباعة -----------------------------
@@ -508,7 +509,7 @@ function printReport() {
         <div class="pr-uni">جامعة الملك خالد</div>
         <div class="pr-sub">تقرير احتساب المعدل الفصلي والتراكمي (غير رسمي)</div>
       </div>
-      <img class="pr-logo" src="assets/logo.svg" alt="" />
+      <img class="pr-logo" src="assets/logo.svg?v=8" alt="" />
     </div>
 
     <div class="pr-title">تقرير المعدل المتوقّع</div>
