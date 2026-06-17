@@ -183,8 +183,9 @@
     "منسحب": "withdrawn", "محروم": "absent", "غائب": "absent", "راسب": "fail",
   };
 
-  // الحالات المستبعَدة من عرض مقررات الفصل الأخير (غائب/راسب/منسحب/غير ناجح)
-  const EXCLUDE_FROM_CURRENT = new Set(["fail", "absent", "withdrawn", "nopass", "denied", "audit", "excused"]);
+  // الحالات المستبعَدة من عرض مقررات الفصل الأخير: فقط ما لا يحمل درجة فعلية
+  // (غائب/محروم، منسحب، غير محتسب، معذور). الراسب (هـ/F) يُعرض لأنه درجة حقيقية تُحتسب.
+  const EXCLUDE_FROM_CURRENT = new Set(["absent", "withdrawn", "nopass", "denied", "audit", "excused"]);
 
   // يُصنّف رمزاً في عمود التقدير: يُرجع {grade, status, raw} أو null إن لم يكن خلية تقدير.
   function classifyGradeCell(s) {
