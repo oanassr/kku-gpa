@@ -259,12 +259,40 @@
     return null;
   }
 
+  // النقاط المطبوعة = الساعات × قيمة التقدير (سلّم 5)، فهي تحدّد التقدير بدقة حين تُفقد خلية التقدير
+  // أو تُقرأ ناقصة (التعرّف الضوئي يُسقط الألف المنفردة في "+أ" مثلاً).
+  const GRADE_VALUES = [["أ+", 5], ["أ", 4.75], ["ب+", 4.5], ["ب", 4], ["ج+", 3.5], ["ج", 3], ["د+", 2.5], ["د", 2], ["هـ", 1]];
+
+  // النقاط الموجبة لا تأتي إلا من تقدير محتسب (المنسحب/غير المحتسب نقاطه 0)، فتتقدّم على أي حالة مقروءة.
+  function reconcileGrade(c) {
+    if (!(c.points > 0) || !(c.hours > 0)) return c;
+    const match = (p) => GRADE_VALUES.find(([, gv]) => Math.abs(gv - p / c.hours) < 0.01);
+    // قراءة مباشرة أولاً، ثم احتمال سقوط الفاصلة العشرية ("75" بدل 7.5، "1425" بدل 14.25)
+    let hit = match(c.points);
+    if (!hit) {
+      for (const div of [10, 100]) {
+        const h = match(c.points / div);
+        if (h && (!c.grade || h[0] === c.grade)) { hit = h; c.points = c.points / div; break; }
+      }
+    }
+    if (hit && hit[0] !== c.grade) {
+      c.grade = hit[0];
+      c.status = hit[0] === "هـ" ? "fail" : "pass";
+      c.inProgress = false;
+    }
+    return c;
+  }
+
   // ---- التعرّف على الفصول الدراسية (لتحديد آخر فصل) --------------------
 
   // يحوّل نص ترويسة فصل إلى مفتاح ترتيبي: السنة×10 + رقم الفصل.
   function parseTermKey(txt) {
+    // رمز الفصل في صفحات EduGate: "(481)" = 1448 الفصل 1. نقدّمه لأنه ثابت في النسختين العربية
+    // والإنجليزية، ويبقى حين يلتفّ عنوان الفصل على سطرين ("Second Semester" / "2025/26 (472)").
+    let m = txt.match(/[()](\d{2})([1-4])[()]/);
+    if (m && /\d{4}|semester|الفصل/i.test(txt)) return (1400 + parseInt(m[1], 10)) * 10 + parseInt(m[2], 10);
     // إنجليزي: "First Semester 2026 / 2027" أو "First Semester 2026/2027 - Active"
-    let m = txt.match(/(First|Second|Third|Fourth|Summer)\s+Semester\s+(\d{4})\s*[/\-]/i);
+    m = txt.match(/(First|Second|Third|Fourth|Summer)\s+Semester\s+(\d{4})\s*[/\-]/i);
     if (m) {
       const tn = { first: 1, second: 2, third: 3, fourth: 3, summer: 4 }[m[1].toLowerCase()];
       return parseInt(m[2], 10) * 10 + tn;
@@ -391,9 +419,10 @@
 
     const grabText = (keys) => {
       for (const k of keys) {
-        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z .,'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||[\\u0600-\\u06FF]|$)", "i");
+        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z0-9 .,'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||[\\u0600-\\u06FF]|$)", "i");
         const m = fullText.match(re);
-        if (m && m[1] && m[1].trim().length > 1) return cleanVal(m[1]);
+        // الأسماء والتخصصات لا تحوي أرقاماً؛ ما يظهر منها شوائب تعرّف ضوئي ("I1")
+        if (m && m[1] && m[1].trim().length > 1) return cleanVal(m[1].replace(/\d+/g, ""));
       }
       return "";
     };
@@ -439,8 +468,9 @@
 
     // أعمدة الفصول النشطة حالياً: [{x, key}] — تُحدَّث عند كل صف ترويسة فصل.
     let columns = [];
-    // ترويسة جدول المقررات العربية الأخيرة (مواضع أعمدتها)
+    // ترويسة جدول المقررات الأخيرة (مواضع أعمدتها) — العربية والإنجليزية
     let header = null;
+    let headerEN = null;
 
     for (const row of rows) {
       const tf = fold(rowText(row, lang));
@@ -450,8 +480,11 @@
       if (terms.length) columns = terms;
 
       // لا نتخطّى الصف: في التخطيط ثنائي العمود قد تقع ترويسة عمود ومقرر العمود الآخر على السطر نفسه
+      // أعمدة جداول السجل الواحد ثابتة المواضع، فنكمل أي عمود فائت من الترويسة السابقة
       const h = detectCourseHeader(row);
-      if (h) header = h;
+      if (h) header = { ...(header || {}), ...h };
+      const hEn = lang === "en" && detectCourseHeaderEN(row);
+      if (hEn) headerEN = { ...(headerEN || {}), ...hEn };
 
       if (remStartF.some((k) => tf.includes(k)) && !tf.includes(fold("نهاية")) && !/end of/i.test(tf)) {
         remedial = true;
@@ -467,9 +500,11 @@
         .sort((a, b) => a.x - b.x);
       if (codeItems.length === 0) continue;
 
-      // تخطيط EduGate المطبوع: سجل عربي لكن عمود الرمز في أقصى اليسار — نوزّع الخلايا حسب ترويسة الجدول
-      if (lang !== "en" && header && header.code < header.name && codeItems.length === 1) {
-        const course = buildCourseByColumns(codeItems[0], row.items, header, remedial);
+      // صفحات EduGate المطبوعة (العربية: الرمز في أقصى اليسار رغم الاتجاه؛ الإنجليزية: أعداد صحيحة
+      // بلا فواصل) — نوزّع الخلايا على أعمدة ترويسة الجدول
+      const colHeader = lang === "en" ? headerEN : (header && header.code < header.name ? header : null);
+      if (colHeader && codeItems.length === 1) {
+        const course = buildCourseByColumns(codeItems[0], row.items, colHeader, remedial, lang);
         if (course) {
           course.termKey = nearestTermKey(codeItems[0].x, columns);
           courses.push(course);
@@ -504,20 +539,38 @@
   const center = (it) => (it.x + it.xEnd) / 2;
 
   // يتعرّف على صف ترويسة جدول مقررات عربي ويُرجع مراكز أعمدته الأفقية.
+  // المطابقة بالاحتواء لا بالتساوي: التعرّف الضوئي قد يُلصق رمزاً شارداً أو يُسقط حرفاً ("التقدي").
   function detectCourseHeader(row) {
     const col = {};
     for (const it of row.items) {
       const f = fold(it.str);
-      if (f === "رمز المقرر") col.code = center(it);
-      else if (f === "اسم المقرر") col.name = center(it);
-      else if (f === "التقدير") col.grade = center(it);
-      else if (f === "الساعات" || f === "س") col.hours = center(it);
-      else if (f === "النقاط") col.points = center(it);
+      if (f.includes("رمز المقرر")) col.code = center(it);
+      else if (f.includes("اسم المقرر")) col.name = center(it);
+      else if (f.includes("التقدي")) col.grade = center(it);
+      else if (f.includes("الساعات") || f === "س") col.hours = center(it);
+      else if (f.includes("النقاط")) col.points = center(it);
     }
     return col.code != null && col.name != null && col.hours != null ? col : null;
   }
 
-  function buildCourseByColumns(codeItem, items, header, remedial) {
+  // ترويسة جدول إنجليزية بعمود واحد (صفحة EduGate الإنجليزية): الساعات قبل النقاط والأعداد صحيحة
+  // ("6" لا "6.00")، فلا يصلح تمييزها بالترتيب أو بالفاصلة. السجل الرسمي ثنائي العمود/اللغة يُترك للمسار العام.
+  function detectCourseHeaderEN(row) {
+    if (row.items.filter((it) => /course\s*code/i.test(it.str)).length !== 1) return null;
+    if (row.items.some((it) => fold(it.str).includes("رمز المقرر"))) return null;
+    const col = {};
+    for (const it of row.items) {
+      const s = it.str.trim();
+      if (/course\s*code/i.test(s)) col.code = center(it);
+      else if (/course\s*name/i.test(s)) col.name = center(it);
+      else if (/credit\s*hours|^hrs$|^hours$/i.test(s)) col.hours = center(it);
+      else if (/^(points|pts)$/i.test(s)) col.points = center(it);
+      else if (/^grade$/i.test(s)) col.grade = center(it);
+    }
+    return col.code != null && col.name != null && col.hours != null ? col : null;
+  }
+
+  function buildCourseByColumns(codeItem, items, header, remedial, lang) {
     const cols = Object.entries(header);
     let grade = "", status = "blank", gradeFound = false, hours = null, points = null;
     const nameParts = [];
@@ -538,14 +591,14 @@
         nameParts.push(it);
       }
     }
-    const name = nameParts.sort((a, b) => b.x - a.x).map((i) => i.str).join(" ").trim();
+    const name = nameParts.sort((a, b) => (lang === "en" ? a.x - b.x : b.x - a.x)).map((i) => i.str).join(" ").trim();
     if (!name && hours === null && !gradeFound) return null;
-    return {
+    return reconcileGrade({
       code: normalizeCode(codeItem.str),
-      name: name || "(بدون اسم)",
+      name: name || (lang === "en" ? "(no name)" : "(بدون اسم)"),
       grade, status, hours: hours || 0, points, remedial,
       inProgress: status === "blank" || status === "inprogress",
-    };
+    });
   }
 
   function nearestTermKey(x, columns) {
@@ -601,7 +654,7 @@
 
     if (!name && hours === null && !gradeFound) return null;
 
-    return {
+    return reconcileGrade({
       code,
       name: name || (lang === "en" ? "(no name)" : "(بدون اسم)"),
       grade, // محتسب فقط (أ+..هـ)، فارغ للحالات غير المحتسبة
@@ -610,7 +663,7 @@
       points: points,
       remedial,
       inProgress: status === "blank" || status === "inprogress",
-    };
+    });
   }
 
   function normalizeCode(s) {
@@ -671,15 +724,16 @@
    * نختار صف آخر فصل مكتمل = الصف ذو معدل > 0 والأكبر بالساعات المكتسبة.
    */
   // ترويسة جدول الملخّص في صفحة EduGate المطبوعة: المعدل | النقاط | نجاح | المكتسبة | المسجلة
+  // ونظيرتها الإنجليزية بالمواضع نفسها: GPA | Points | Graded | Passed | Registered
   function detectSummaryHeader(row) {
     const col = {};
     for (const it of row.items) {
       const f = fold(it.str);
-      if (f === "المعدل") col.gpa = center(it);
-      else if (f === "النقاط") col.points = center(it);
-      else if (f === "المكتسبه") col.earned = center(it);
-      else if (f === "المسجله") col.registered = center(it);
-      else if (f === "نجاح") col.passed = center(it);
+      if (f === "المعدل" || /^gpa$/i.test(f)) col.gpa = center(it);
+      else if (f === "النقاط" || /^points$/i.test(f)) col.points = center(it);
+      else if (f === "المكتسبه" || /^passed$/i.test(f)) col.earned = center(it);
+      else if (f === "المسجله" || /^registered$/i.test(f)) col.registered = center(it);
+      else if (f === "نجاح" || /^graded$/i.test(f)) col.passed = center(it);
     }
     return col.gpa != null && col.points != null && col.earned != null ? col : null;
   }
@@ -800,9 +854,10 @@
   /**
    * يحلّل ملف PDF (ArrayBuffer) ويُرجع كائن البيانات المُستخلصة.
    */
-  async function parseRecord(arrayBuffer, pdfjsLib) {
+  async function parseRecord(arrayBuffer, pdfjsLib, opts = {}) {
     const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
     const pdf = await loadingTask.promise;
+    let ocrUsed = false;
 
     let allRows = [];
     let pageWidth = 0;
@@ -817,6 +872,19 @@
       const yOffset = (p - 1) * 100000;
       items.forEach((it) => (it.y += yOffset));
       allItems = allItems.concat(items);
+    }
+
+    // ملف مصوَّر: نستعين بالتعرّف الضوئي، ثم نجمع كلماته في عبارات كما في الصفحات المفرّقة
+    if (allItems.length === 0 && opts.ocr) {
+      const pages = await opts.ocr(pdf);
+      pages.forEach((words, i) => {
+        const items = mergeGlyphRuns(
+          words.map((it) => ({ ...it, str: arabicNormalize(it.str) })).filter((it) => it.str)
+        );
+        items.forEach((it) => (it.y += i * 100000));
+        allItems = allItems.concat(items);
+      });
+      ocrUsed = allItems.length > 0;
     }
 
     // ملف بلا طبقة نصية = صورة ممسوحة/ملتقطة؛ لا يمكن قراءته دون OCR
@@ -894,6 +962,7 @@
 
     return {
       lang,
+      ocr: ocrUsed,
       student,
       cumulative,
       cumulativePrinted,
