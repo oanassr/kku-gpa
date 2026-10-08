@@ -27,6 +27,10 @@
       // أرقام عربية-هندية → لاتينية
       if (code >= 0x0660 && code <= 0x0669) { out += String(code - 0x0660); continue; }
       if (code >= 0x06f0 && code <= 0x06f9) { out += String(code - 0x06f0); continue; }
+      // خطوط بعض السجلات المطبوعة من المتصفح تُرجع أشكالاً فارسية: ی ھ ک
+      if (code === 0x06CC) { out += "ي"; continue; }
+      if (code === 0x06BE || code === 0x06C1) { out += "ه"; continue; }
+      if (code === 0x06A9) { out += "ك"; continue; }
       // إسقاط التشكيل والمحارف الاتجاهية وعلامة التطويل ومحارف صفرية العرض
       if (
         (code >= 0x0610 && code <= 0x061A) ||
@@ -99,11 +103,67 @@
     return rows;
   }
 
+  // ---- دمج الحروف المفرّقة ---------------------------------------------
+  // صفحات EduGate المطبوعة من المتصفح تُرجع العربية حرفاً حرفاً (كل حرف عنصر مستقل).
+
+  const HAS_AR = /[؀-ۿ]/;
+
+  function isGlyphSplit(items) {
+    const ar = items.filter((i) => HAS_AR.test(i.str));
+    if (ar.length < 20) return false;
+    const single = ar.filter((i) => i.str.replace(/\s+/g, "").length <= 2).length;
+    return single / ar.length > 0.6;
+  }
+
+  // الفجوات المقيسة: داخل الكلمة ≈ 0، بين الكلمات ≈ 0.3 من ارتفاع الخط، بين الخلايا عشرات النقاط.
+  function mergeGlyphRuns(items) {
+    const out = [];
+    for (const row of groupRows(items, 3)) {
+      const its = row.items;
+      let run = [its[0]];
+      const flush = () => {
+        const rtl = run.some((i) => HAS_AR.test(i.str));
+        const ordered = rtl ? run.slice().reverse() : run;
+        let str = ordered[0].str;
+        for (let k = 1; k < ordered.length; k++) {
+          const a = rtl ? ordered[k] : ordered[k - 1];
+          const b = rtl ? ordered[k - 1] : ordered[k];
+          const gap = b.x - a.xEnd;
+          str += (gap > Math.max(a.h, b.h) * 0.1 ? " " : "") + ordered[k].str;
+        }
+        const x = Math.min(...run.map((i) => i.x));
+        const xEnd = Math.max(...run.map((i) => i.xEnd));
+        out.push({
+          str: str.replace(/\s+/g, " ").trim(), x, xEnd, w: xEnd - x,
+          y: run.reduce((s, i) => s + i.y, 0) / run.length,
+          h: Math.max(...run.map((i) => i.h)),
+        });
+      };
+      for (let k = 1; k < its.length; k++) {
+        const prev = run[run.length - 1], cur = its[k];
+        if (cur.x - prev.xEnd < Math.max(prev.h, cur.h)) run.push(cur);
+        else { flush(); run = [cur]; }
+      }
+      flush();
+    }
+    return out;
+  }
+
   // ---- أنماط التعرّف ----------------------------------------------------
 
   // رمز المقرر: أحرف (عربية أو لاتينية) مع 3–4 أرقام، وقد يتخللها شرطة ورقم وحدات.
-  // أمثلة: "نما2044"، "نما-2044"، "6004نما-3"، "MIS6001"، "MIS-6001".
+  // أمثلة: "نما2044"، "نما-2044"، "6004نما-3"، "3-نما3322"، "MIS6001"، "MIS-6001".
   const COURSE_CODE_RE = /^(?=.*[A-Za-zء-ي])(?=.*\d{3,})[A-Za-zء-ي0-9\-]+$/;
+
+  // يتحقق من أن النص رمز مقرر حقيقي وليس تاريخاً أو عنصراً آخر.
+  function isCourseCode(s) {
+    if (!COURSE_CODE_RE.test(s)) return false;
+    // استبعاد أنماط التاريخ dd-mm-yyyy
+    if (/\d{1,2}[-\/]\d{2}[-\/]\d{4}/.test(s)) return false;
+    // استبعاد "1من08-10-2026" (رقم الصفحة + "من" + التاريخ في تذييل السجل الرسمي)
+    if (/^\d{1,3}من\d/.test(s)) return false;
+    return true;
+  }
 
   // كشف لغة السجل من نسبة الأحرف اللاتينية مقابل العربية.
   function detectLang(items) {
@@ -141,7 +201,7 @@
   }
 
   function isNumberToken(s) {
-    return /^-?\d+(\.\d+)?$/.test(s.replace(/\s+/g, ""));
+    return /^-?(\d+(\.\d+)?|\.\d+)$/.test(s.replace(/\s+/g, ""));
   }
 
   // كلمات دلالية ثنائية اللغة في الترويسة والملخصات
@@ -203,16 +263,24 @@
 
   // يحوّل نص ترويسة فصل إلى مفتاح ترتيبي: السنة×10 + رقم الفصل.
   function parseTermKey(txt) {
-    let m = txt.match(/(First|Second|Third|Fourth|Summer)\s+Semester\s+(\d{4})\s*\/\s*\d{4}/i);
+    // إنجليزي: "First Semester 2026 / 2027" أو "First Semester 2026/2027 - Active"
+    let m = txt.match(/(First|Second|Third|Fourth|Summer)\s+Semester\s+(\d{4})\s*[/\-]/i);
     if (m) {
       const tn = { first: 1, second: 2, third: 3, fourth: 3, summer: 4 }[m[1].toLowerCase()];
       return parseInt(m[2], 10) * 10 + tn;
     }
     const f = fold(txt);
+    // عربي صيغة 1: "الفصل الأول 1448" (الاسم ثم الرقم)
     m = f.match(/الفصل\s+(الاول|الثاني|الثالث|الرابع|الصيفي)\s+(\d{3,4})/);
     if (m) {
       const tn = { "الاول": 1, "الثاني": 2, "الثالث": 3, "الرابع": 3, "الصيفي": 4 }[m[1]];
       return parseInt(m[2], 10) * 10 + tn;
+    }
+    // عربي صيغة 2: "1448 الفصل الأول" (الرقم قبل الاسم بسبب ترتيب العرض)
+    m = f.match(/(\d{4})\s+الفصل\s+(الاول|الثاني|الثالث|الرابع|الصيفي)/);
+    if (m) {
+      const tn = { "الاول": 1, "الثاني": 2, "الثالث": 3, "الرابع": 3, "الصيفي": 4 }[m[2]];
+      return parseInt(m[1], 10) * 10 + tn;
     }
     return null;
   }
@@ -252,43 +320,54 @@
     };
     const head = rows.slice(0, 16);
 
-    // تاريخ الطباعة (مشترك للغتين)
+    // تاريخ الطباعة (مشترك للغتين) — مع منع الالتقاط من داخل أرقام أطول كرقم المستند
     for (const r of rows) {
-      const m = rowText(r, lang).match(/(\d{1,2}[-/]\d{1,2}[-/]\d{4})/);
+      const m = rowText(r, lang).match(/(?<![\d-])(\d{1,2}[-/]\d{1,2}[-/]\d{4})(?![\d-])/);
       if (m) { info.printDate = m[1]; break; }
     }
 
-    if (lang === "en") return extractHeaderEN(head, info);
-    return extractHeaderAR(head, info);
+    // العربي أولاً (السجلات ثنائية اللغة عربية الأصل)، ثم استكمال الحقول الناقصة من الإنجليزي
+    extractHeaderAR(head, info);
+    if (lang === "en" || !info.name || !info.studentId) {
+      const en = extractHeaderEN(head, { ...info, name: "", studentId: "", major: "", degree: "", college: "", civilId: "" });
+      for (const k of ["name", "studentId", "major", "degree", "college", "civilId", "university"]) {
+        if (!info[k] && en[k]) info[k] = en[k];
+      }
+    }
+    return info;
   }
 
   // ---- ترويسة السجل العربي (مسار مُتحقَّق منه) ----
   function extractHeaderAR(head, info) {
-    const fullText = head.map((r) => rowText(r, "ar")).join("  ||  ");
+    // نُبقي العناصر العربية والرقمية فقط حتى لا يختلط النص الإنجليزي بالقيم في السجلات ثنائية اللغة
+    const arText = (r) => r.items
+      .filter((i) => !/[A-Za-z]/.test(i.str))
+      .sort((a, b) => b.x - a.x)
+      .map((i) => i.str).join(" ");
+    const fullText = head.map(arText).join("  ||  ");
     if (/الملك\s*خالد/.test(fold(fullText))) info.university = "جامعة الملك خالد";
 
     for (const r of head) {
-      const t = rowText(r, "ar");
+      const t = arText(r);
       const tf = fold(t);
-      if (!info.name && tf.includes("الاسم")) {
-        const m = t.match(/الاسم\s*:?\s*([^\:]+?)(?:التخصص|رقم|الدرجة|السجل|$)/);
+      if (!info.name && (tf.includes("الاسم") || tf.includes("اسم الطالب"))) {
+        const m = t.match(/(?:الاسم|اسم الطالب)\s*:?\s*([^\:]+?)\s*(?:التخصص|رقم|الدرجة|السجل|:|$)/);
         if (m) info.name = cleanVal(m[1]);
-        else info.name = cleanVal(t.slice(t.indexOf("الاسم") + 5).replace(/^[\s:]+/, ""));
       }
       if (!info.major && tf.includes("التخصص")) {
-        const m = t.match(/التخصص\s*:?\s*([^\:]+?)(?:الاسم|رقم|الدرجة|السجل|$)/);
+        const m = t.match(/التخصص\s*:?\s*([^\:]+?)\s*(?:الاسم|اسم الطالب|رقم|الدرجة|السجل|نوع|عدد|:|$)/);
         if (m) info.major = cleanVal(m[1]);
       }
       if (!info.degree && tf.includes("الدرجه")) {
-        const m = t.match(/الدرجة\s*:?\s*([^\:]+?)(?:رقم|الاسم|التخصص|$)/);
+        const m = t.match(/الدرجة\s*:?\s*([^\:]+?)\s*(?:رقم|الاسم|التخصص|نوع|:|$)/);
         if (m) info.degree = cleanVal(m[1]);
       }
       if (!info.studentId && tf.includes("رقم الطالب")) {
-        const m = t.match(/(\d{6,})/);
+        const m = t.match(/رقم الطالب\D{0,6}(\d{6,})/) || t.match(/(\d{6,})/);
         if (m) info.studentId = m[1];
       }
       if (!info.civilId && tf.includes("السجل المدني")) {
-        const m = t.match(/(\d{8,})/);
+        const m = t.match(/السجل المدني\D{0,6}(\d{8,})/) || t.match(/(\d{8,})/);
         if (m) info.civilId = m[1];
       }
       if (!info.college && tf.includes("الكليه")) {
@@ -312,7 +391,7 @@
 
     const grabText = (keys) => {
       for (const k of keys) {
-        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z .,'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||$)", "i");
+        const re = new RegExp(escapeRe(k) + "\\s*[:：.\\-–]+\\s*([A-Za-z][A-Za-z .,'\\-&/]+?)\\s*(?:" + boundary + "|\\|\\||[\\u0600-\\u06FF]|$)", "i");
         const m = fullText.match(re);
         if (m && m[1] && m[1].trim().length > 1) return cleanVal(m[1]);
       }
@@ -360,6 +439,8 @@
 
     // أعمدة الفصول النشطة حالياً: [{x, key}] — تُحدَّث عند كل صف ترويسة فصل.
     let columns = [];
+    // ترويسة جدول المقررات العربية الأخيرة (مواضع أعمدتها)
+    let header = null;
 
     for (const row of rows) {
       const tf = fold(rowText(row, lang));
@@ -367,6 +448,10 @@
       // تحديث أعمدة الفصول إن كان هذا الصف ترويسة فصل/فصول
       const terms = detectTerms(row);
       if (terms.length) columns = terms;
+
+      // لا نتخطّى الصف: في التخطيط ثنائي العمود قد تقع ترويسة عمود ومقرر العمود الآخر على السطر نفسه
+      const h = detectCourseHeader(row);
+      if (h) header = h;
 
       if (remStartF.some((k) => tf.includes(k)) && !tf.includes(fold("نهاية")) && !/end of/i.test(tf)) {
         remedial = true;
@@ -378,9 +463,19 @@
 
       // ابحث عن رموز المقررات في هذا الصف (قد يوجد رمزان عند التخطيط ثنائي العمود)
       const codeItems = row.items
-        .filter((it) => COURSE_CODE_RE.test(it.str))
+        .filter((it) => isCourseCode(it.str))
         .sort((a, b) => a.x - b.x);
       if (codeItems.length === 0) continue;
+
+      // تخطيط EduGate المطبوع: سجل عربي لكن عمود الرمز في أقصى اليسار — نوزّع الخلايا حسب ترويسة الجدول
+      if (lang !== "en" && header && header.code < header.name && codeItems.length === 1) {
+        const course = buildCourseByColumns(codeItems[0], row.items, header, remedial);
+        if (course) {
+          course.termKey = nearestTermKey(codeItems[0].x, columns);
+          courses.push(course);
+        }
+        continue;
+      }
 
       // نطاق خلايا كل مقرر حسب اتجاه اللغة:
       //  - العربية (RTL): الخلايا تقع يسار الرمز (x أقل) حتى رمز العمود التالي يساراً.
@@ -404,6 +499,53 @@
       }
     }
     return courses;
+  }
+
+  const center = (it) => (it.x + it.xEnd) / 2;
+
+  // يتعرّف على صف ترويسة جدول مقررات عربي ويُرجع مراكز أعمدته الأفقية.
+  function detectCourseHeader(row) {
+    const col = {};
+    for (const it of row.items) {
+      const f = fold(it.str);
+      if (f === "رمز المقرر") col.code = center(it);
+      else if (f === "اسم المقرر") col.name = center(it);
+      else if (f === "التقدير") col.grade = center(it);
+      else if (f === "الساعات" || f === "س") col.hours = center(it);
+      else if (f === "النقاط") col.points = center(it);
+    }
+    return col.code != null && col.name != null && col.hours != null ? col : null;
+  }
+
+  function buildCourseByColumns(codeItem, items, header, remedial) {
+    const cols = Object.entries(header);
+    let grade = "", status = "blank", gradeFound = false, hours = null, points = null;
+    const nameParts = [];
+    for (const it of items) {
+      if (it === codeItem) continue;
+      const cx = center(it);
+      let best = cols[0];
+      for (const c of cols) if (Math.abs(cx - c[1]) < Math.abs(cx - best[1])) best = c;
+      const s = it.str;
+      if (best[0] === "grade") {
+        const cls = classifyGradeCell(s);
+        if (cls) { grade = cls.grade; status = cls.status; gradeFound = true; }
+      } else if (best[0] === "hours" && isNumberToken(s)) {
+        hours = Number(s);
+      } else if (best[0] === "points" && isNumberToken(s)) {
+        points = Number(s);
+      } else if (best[0] === "name") {
+        nameParts.push(it);
+      }
+    }
+    const name = nameParts.sort((a, b) => b.x - a.x).map((i) => i.str).join(" ").trim();
+    if (!name && hours === null && !gradeFound) return null;
+    return {
+      code: normalizeCode(codeItem.str),
+      name: name || "(بدون اسم)",
+      grade, status, hours: hours || 0, points, remedial,
+      inProgress: status === "blank" || status === "inprogress",
+    };
   }
 
   function nearestTermKey(x, columns) {
@@ -446,9 +588,12 @@
       nameParts.push(it);
     }
 
+    // السجل ثنائي اللغة يحوي الاسمين؛ نكتفي بالعربي لأن الواجهة عربية
+    const arParts = nameParts.filter((i) => HAS_AR.test(i.str));
+    const useAr = arParts.length > 0 && arParts.length < nameParts.length;
     // اسم المقرر بترتيب القراءة: العربية يمين←يسار، الإنجليزية يسار←يمين
-    const name = nameParts
-      .sort((a, b) => (lang === "en" ? a.x - b.x : b.x - a.x))
+    const name = (useAr ? arParts : nameParts)
+      .sort((a, b) => (lang === "en" && !useAr ? a.x - b.x : b.x - a.x))
       .map((i) => i.str)
       .join(" ")
       .replace(/\s+/g, " ")
@@ -525,10 +670,72 @@
    *   - الساعات المكتسبة = أصغرهما (الداخلة في المعدل).
    * نختار صف آخر فصل مكتمل = الصف ذو معدل > 0 والأكبر بالساعات المكتسبة.
    */
+  // ترويسة جدول الملخّص في صفحة EduGate المطبوعة: المعدل | النقاط | نجاح | المكتسبة | المسجلة
+  function detectSummaryHeader(row) {
+    const col = {};
+    for (const it of row.items) {
+      const f = fold(it.str);
+      if (f === "المعدل") col.gpa = center(it);
+      else if (f === "النقاط") col.points = center(it);
+      else if (f === "المكتسبه") col.earned = center(it);
+      else if (f === "المسجله") col.registered = center(it);
+      else if (f === "نجاح") col.passed = center(it);
+    }
+    return col.gpa != null && col.points != null && col.earned != null ? col : null;
+  }
+
+  const isPlaceholder = (s) => /^\*+$/.test(s.trim());
+
+  function summaryByColumns(row, header) {
+    const cols = Object.entries(header);
+    const v = {};
+    for (const it of row.items) {
+      if (!isNumberToken(it.str)) continue;
+      const cx = center(it);
+      let best = cols[0];
+      for (const c of cols) if (Math.abs(cx - c[1]) < Math.abs(cx - best[1])) best = c;
+      v[best[0]] = Number(it.str);
+    }
+    if (v.gpa == null) return null;
+    return { gpa: v.gpa, points: v.points ?? null, hoursEarned: v.earned ?? null, hoursRegistered: v.registered ?? null };
+  }
+
+  // السجل الرسمي: "تراكمي مكتسبة <مكتسبة> معدل <معدل> <س> <نقاط>" (يُقرأ من اليمين) أو
+  // "Cumulative E-HRS <earned> GPA <gpa> <registered> <points>" (من اليسار).
+  function summaryByKeywords(row, label) {
+    const ar = HAS_AR.test(label.str);
+    const toks = row.items
+      .filter((it) => it !== label && (ar ? it.x < label.x : it.x > label.x))
+      .sort((a, b) => (ar ? b.x - a.x : a.x - b.x));
+    let earned = null, gpa = null, expect = null;
+    const rest = [];
+    for (const it of toks) {
+      const s = it.str;
+      if (ar ? /[A-Za-z]/.test(s) : HAS_AR.test(s)) break; // بلغنا النصف الآخر من السجل ثنائي اللغة
+      const f = fold(s);
+      if (ar ? f.includes("مكتسب") : /e-?hrs/i.test(s)) { expect = "earned"; continue; }
+      if (ar ? f.includes("معدل") : /^gpa$/i.test(s)) { expect = "gpa"; continue; }
+      const num = isNumberToken(s) ? Number(s) : (isPlaceholder(s) ? null : undefined);
+      if (num === undefined) continue;
+      if (expect === "earned") { earned = num; expect = null; }
+      else if (expect === "gpa") { gpa = num; expect = null; }
+      else if (gpa != null) { rest.push(num); if (rest.length === 2) break; }
+    }
+    if (gpa == null || earned == null) return null;
+    return { gpa, hoursEarned: earned, hoursRegistered: rest[0] ?? null, points: rest[1] ?? null };
+  }
+
   function extractCumulative(rows, pageWidth, lang) {
     const mid = (pageWidth || 857) / 2;
     const candidates = [];
+    let columns = [];
+    let sumHeader = null;
     for (const row of rows) {
+      const terms = detectTerms(row);
+      if (terms.length) columns = terms;
+      const sh = detectSummaryHeader(row);
+      if (sh) sumHeader = sh;
+
       // قد يحتوي الصف على عمودين؛ نعالج كل تسمية "تراكمي / Cumulative" ضمن عمودها فقط
       // لتفادي تلوّث الأرقام بترويسة العمود المجاور (مثل "الإنذارات: 1" و"1447").
       const labels = row.items.filter((it) => {
@@ -538,6 +745,13 @@
       if (labels.length === 0) continue;
       for (let li = 0; li < labels.length; li++) {
         const label = labels[li];
+        const termKey = nearestTermKey(label.x, columns);
+        const exact = (sumHeader && sumHeader.gpa > label.x && summaryByColumns(row, sumHeader)) ||
+          summaryByKeywords(row, label);
+        if (exact) {
+          candidates.push({ ...exact, termKey, order: candidates.length });
+          continue;
+        }
         // اختيار خلايا الملخّص حسب الاتجاه:
         //  - العربية: نفس نصف الصفحة (التخطيط ثنائي العمود) لتفادي تلوّث العمود المجاور.
         //  - الإنجليزية: الأرقام تقع يمين التسمية حتى تسمية العمود التالي (LTR).
@@ -563,19 +777,22 @@
         const hoursRegistered = rest.length ? Math.max(...rest) : (bigs.length ? bigs[0] : null);
         const hoursEarned = rest.length ? Math.min(...rest) : hoursRegistered;
 
-        candidates.push({ gpa, points, hoursRegistered, hoursEarned, y: row.y });
+        candidates.push({ gpa, points, hoursRegistered, hoursEarned, termKey, order: candidates.length, heuristic: true });
       }
     }
     if (candidates.length === 0) return null;
 
-    // آخر فصل مكتمل: معدل > 0 وأكبر ساعات مكتسبة
-    const valid = candidates.filter((c) => c.gpa > 0 && c.hoursEarned);
-    const pool = valid.length ? valid : candidates;
-    let best = pool[0];
-    for (const c of pool) {
-      if ((c.hoursEarned || 0) >= (best.hoursEarned || 0)) best = c;
+    // آخر فصل مكتمل = أحدث فصل (بمفتاح الفصل) معدله > 0. ترتيب الفصول في الصفحة قد يكون
+    // تصاعدياً (السجل الرسمي) أو تنازلياً (صفحة EduGate)، والانسحاب قد يُنقص الساعات المكتسبة،
+    // لذا لا يصلح الاعتماد على الترتيب أو على أكبر ساعات.
+    // صفحة EduGate تكرّر المعدل السابق في صف الفصل الجاري مع نقاط = 0؛ نستبعده
+    const valid = candidates.filter((c) => c.gpa > 0 && c.hoursEarned && c.points !== 0);
+    if (!valid.length) return candidates[candidates.length - 1];
+    const keyed = valid.filter((c) => c.termKey != null);
+    if (keyed.length) {
+      return keyed.reduce((b, c) => (c.termKey > b.termKey || (c.termKey === b.termKey && !c.heuristic && b.heuristic) ? c : b));
     }
-    return best;
+    return valid.reduce((b, c) => ((c.hoursEarned || 0) >= (b.hoursEarned || 0) ? c : b));
   }
 
   // ---- الدالة العامة ----------------------------------------------------
@@ -593,12 +810,21 @@
 
     for (let p = 1; p <= pdf.numPages; p++) {
       const page = await pdf.getPage(p);
-      const { items, width } = await extractItems(page);
+      let { items, width } = await extractItems(page);
+      if (isGlyphSplit(items)) items = mergeGlyphRuns(items);
       pageWidth = Math.max(pageWidth, width);
       // نزيح y لكل صفحة لتفادي تداخل الصفوف
       const yOffset = (p - 1) * 100000;
       items.forEach((it) => (it.y += yOffset));
       allItems = allItems.concat(items);
+    }
+
+    // ملف بلا طبقة نصية = صورة ممسوحة/ملتقطة؛ لا يمكن قراءته دون OCR
+    if (allItems.length === 0) {
+      return {
+        noText: true, lang: "ar", student: {}, cumulative: null, cumulativePrinted: null,
+        completed: [], remedial: [], current: [], _debug: { rows: 0, totalCourses: 0, pages: pdf.numPages },
+      };
     }
 
     allRows = groupRows(allItems);
@@ -649,9 +875,15 @@
     if (cumulativePrinted && cumulativePrinted.gpa > 0 && (cumulativePrinted.hoursEarned || cumulativePrinted.hoursRegistered)) {
       // للحصول على حساب دقيق مطابق للعمادة نستخدم الساعات المكتسبة مع النقاط المطبوعة،
       // لأن المعدل التراكمي الرسمي = النقاط ÷ الساعات المكتسبة (المقررات التكميلية لا تُحتسب).
+      const cp = cumulativePrinted;
+      let hours = cp.hoursEarned || cp.hoursRegistered; // الساعات المكتسبة
+      // صفحة EduGate تطبع "المكتسبة" شاملة ساعات لا تدخل في المعدل؛ ساعات المعدل الفعلية = النقاط ÷ المعدل
+      if (cp.points > 0 && hours > 0 && Math.abs(cp.points / hours - cp.gpa) > 0.006) {
+        hours = Math.round(cp.points / cp.gpa);
+      }
       cumulative = {
-        gpa: cumulativePrinted.gpa,
-        hours: cumulativePrinted.hoursEarned || cumulativePrinted.hoursRegistered, // الساعات المكتسبة
+        gpa: cp.gpa,
+        hours,
         hoursRegistered: cumulativePrinted.hoursRegistered, // عمود (س) — للعرض/المرجع
         points: cumulativePrinted.points, // أسفل عمود النقاط المطبوع
         source: "printed",

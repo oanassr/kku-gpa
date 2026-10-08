@@ -94,6 +94,13 @@ async function handleFile(file) {
   try {
     const buf = await file.arrayBuffer();
     const data = await parseRecord(buf, pdfjsLib);
+    if (data.noText) {
+      setStatus("error",
+        "هذا الملف صورة (ممسوح ضوئياً أو محفوظ كصور) ولا يحتوي على نص قابل للقراءة. " +
+        "حمّل السجل الأكاديمي من البوابة الإلكترونية بصيغة PDF الأصلية، أو افتح صفحة السجل في المتصفح " +
+        "واطبعها باختيار «حفظ كـ PDF»، أو ابدأ الإدخال يدوياً.");
+      return;
+    }
     applyParsed(data);
     const n = data.current.length;
     if (n === 0) {
